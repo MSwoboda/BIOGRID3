@@ -1,0 +1,6 @@
+{
+  "name": "BioGrid",
+  "description": "Multi-category database search utility for interacting with openFDA data spanning Drugs, Devices, Foods and Tobacco reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
