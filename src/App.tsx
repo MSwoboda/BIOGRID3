@@ -1,16 +1,28 @@
 import React from 'react';
 import { useState, useRef, useEffect } from 'react';
-import { Category, SearchResult, CountResult } from './types';
-import { fetchFDAData, fetchFDACounts, fetchDeviceRecalls, fetchDeviceRecallCounts, parseReport } from './lib/api';
+import { Category, SearchResult, CountResult, ManufacturerGroup } from './types';
+
+import { fetchFDAData, fetchFDACounts, fetchDeviceRecalls, fetchDeviceRecallCounts, extractDeviceIdentifiers, autoGroupManufacturers, parseReport, detectQueryFieldKey, probeFallbackFields, resolveSearchFields, SEARCH_FIELD_GROUPS } from './lib/api';
+import type { DeviceIdentifier } from './lib/api';
+
+
 import { useStore } from './store';
-import { cn, formatDate } from './lib/utils';
-import { Search, FolderOpen, PieChart, List as ListIcon, Download, Bookmark, AlertTriangle, Clock, Box, Activity, Apple, Cigarette, ChevronDown, ChevronRight, History, PanelLeftClose, PanelLeft, Filter, X, ChevronLeft } from 'lucide-react';
+import { cn, formatDate, generateId } from './lib/utils';
+
+import { Search, FolderOpen, PieChart, List as ListIcon, Download, Bookmark, AlertTriangle, Clock, Box, Activity, Apple, Cigarette, ChevronDown, ChevronRight, History, PanelLeftClose, PanelLeft, Filter, X, ChevronLeft, Share2, Copy, Settings, LogOut, Pencil, Users, CheckCheck, Plus, Calendar } from 'lucide-react';
+
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import SavedScreen from './components/SavedScreen';
+import ReportModal from './components/ReportModal';
+import SplashScreen from './components/SplashScreen';
+import { useAuth } from './hooks/useAuth';
 
 // --- Subcomponents will be separated shortly, injecting them all in App.tsx for rapid iteration ---
 
 export default function App() {
+  const { user, loading: authLoading, authError, signIn, signOut } = useAuth();
+  const store = useStore(user?.uid ?? null);
+
   const [activeTab, setActiveTab] = useState<'search' | 'history' | 'saved'>('search');
   const [searchCategory, setSearchCategory] = useState<Category>('device');
   const [isDbsOpen, setIsDbsOpen] = useState(true);
@@ -21,6 +33,22 @@ export default function App() {
     setActiveTab('search');
   };
 
+  // Show splash for unauthenticated users
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-violet-600 animate-pulse" />
+          <p className="text-zinc-500 text-sm">Loading…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <SplashScreen onSignIn={signIn} loading={authLoading} authError={authError} />;
+  }
+
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-50 font-sans">
       {/* Sidebar */}
@@ -28,12 +56,12 @@ export default function App() {
         <div className={cn("p-4 border-b border-zinc-800 flex items-center justify-between tracking-tight flex-shrink-0 h-16 w-full", !isSidebarOpen && "justify-center")}>
           {isSidebarOpen && (
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded bg-zinc-100 text-zinc-950 hover:bg-zinc-200 flex items-center justify-center text-zinc-50 font-bold text-xl">B</div>
+              <div className="w-8 h-8 rounded bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-blue-500/20">B</div>
               <h1 className="text-xl font-bold tracking-tight text-zinc-100 uppercase">biogrid</h1>
             </div>
           )}
           {!isSidebarOpen && (
-            <div className="w-8 h-8 rounded bg-zinc-100 text-zinc-950 hover:bg-zinc-200 flex items-center justify-center text-zinc-50 font-bold text-lg cursor-pointer" onClick={() => setIsSidebarOpen(true)}>B</div>
+            <div className="w-8 h-8 rounded bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center text-white font-bold text-sm cursor-pointer shadow-lg" onClick={() => setIsSidebarOpen(true)}>B</div>
           )}
           {isSidebarOpen && (
             <button onClick={() => setIsSidebarOpen(false)} className="text-zinc-500 hover:text-zinc-400 p-1">
@@ -106,55 +134,524 @@ export default function App() {
             </button>
           </div>
         </nav>
+
+        {/* User account section at bottom of sidebar */}
+        <div className={cn(
+          "border-t border-zinc-800 p-3 flex items-center gap-2.5 shrink-0",
+          !isSidebarOpen && "justify-center flex-col py-3"
+        )}>
+          {user.photoURL ? (
+            <img src={user.photoURL} alt={user.displayName ?? 'User'}
+              className="w-8 h-8 rounded-full ring-2 ring-zinc-700 shrink-0" />
+          ) : (
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-white font-bold text-sm shrink-0">
+              {(user.displayName ?? user.email ?? 'U')[0].toUpperCase()}
+            </div>
+          )}
+          {isSidebarOpen && (
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-zinc-200 truncate">{user.displayName ?? 'User'}</p>
+              <p className="text-[10px] text-zinc-600 truncate">{user.email}</p>
+            </div>
+          )}
+          <button
+            onClick={signOut}
+            title="Sign out"
+            className="p-1.5 text-zinc-600 hover:text-zinc-400 hover:bg-zinc-800 rounded-lg transition-colors shrink-0"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </aside>
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col h-screen overflow-hidden">
-        <div className="flex-1 overflow-y-auto">
-           {activeTab === 'search' && <SearchScreen category={searchCategory} setCategory={setSearchCategory} />}
-           {activeTab === 'history' && <HistoryScreen />}
-           {activeTab === 'saved' && <SavedScreen />}
+        <div className="flex-1 overflow-y-auto relative">
+           {/* SearchScreen always mounted — CSS hide so state/results survive tab switches */}
+           <div style={{ display: activeTab === 'search' ? undefined : 'none' }}>
+             <SearchScreen category={searchCategory} setCategory={setSearchCategory} store={store} />
+           </div>
+           {activeTab === 'history' && <HistoryScreen store={store} />}
+           {activeTab === 'saved' && <SavedScreen store={store} />}
         </div>
       </main>
     </div>
   );
 }
 
-function SearchScreen({ category, setCategory }: { category: Category, setCategory: (c: Category) => void }) {
-  const [query, setQuery] = useState('');
+
+
+// ── SimpleFilterChart — gear-filterable bar chart for Analytics tab ──────────
+function SimpleFilterChart({
+  title, icon, data, barHue, layout,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  data: { term: string; count: number }[];
+  barHue: number;
+  layout: 'vertical' | 'horizontal';
+}) {
+  const [showSettings, setShowSettings] = React.useState(false);
+  const [hidden, setHidden] = React.useState<Set<string>>(new Set());
+  const [limit, setLimit] = React.useState(20);
+  const settingsRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!showSettings) return;
+    const handler = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node))
+        setShowSettings(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showSettings]);
+
+  const visibleData = data.filter(d => !hidden.has(d.term)).slice(0, limit);
+
+  return (
+    <div className="bg-zinc-950 p-4 rounded-lg shadow-sm border border-zinc-800">
+      <div className="flex items-center gap-2 mb-4">
+        {icon}
+        <h3 className="text-sm font-bold text-zinc-100 flex-1">{title}</h3>
+        <div className="relative" ref={settingsRef}>
+          <button
+            onClick={() => setShowSettings(s => !s)}
+            title="Chart settings"
+            className={cn('p-1.5 rounded-md border border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors', showSettings && 'bg-zinc-800 text-zinc-300')}
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+          {showSettings && (
+            <div className="absolute right-0 top-full mt-2 z-30 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-64 p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-zinc-300">Chart Settings</span>
+                <button onClick={() => setShowSettings(false)} className="text-zinc-600 hover:text-zinc-400"><X className="w-3.5 h-3.5" /></button>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1.5">Show top</p>
+                <div className="flex gap-1.5 flex-wrap">
+                  {[10, 20, 30].map(n => (
+                    <button key={n} onClick={() => setLimit(n)}
+                      className={cn('px-2.5 py-1 text-xs rounded border transition-colors',
+                        limit === n ? 'bg-blue-600 border-blue-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500')}>
+                      {n}
+                    </button>
+                  ))}
+                  <button onClick={() => setLimit(Infinity as unknown as number)}
+                    className={cn('px-2.5 py-1 text-xs rounded border transition-colors',
+                      limit === (Infinity as unknown as number) ? 'bg-blue-600 border-blue-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500')}>
+                    All
+                  </button>
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Items</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => setHidden(new Set())} className="text-[10px] text-zinc-600 hover:text-zinc-300 transition-colors">Select all</button>
+                    <span className="text-zinc-700">·</span>
+                    <button onClick={() => setHidden(new Set(data.map(d => d.term)))} className="text-[10px] text-zinc-600 hover:text-zinc-300 transition-colors">Deselect all</button>
+                  </div>
+                </div>
+                <div className="space-y-1 max-h-52 overflow-y-auto pr-1">
+                  {data.slice(0, 50).map(({ term, count }) => {
+                    const isHidden = hidden.has(term);
+                    return (
+                      <label key={term} className="flex items-center gap-2 cursor-pointer group">
+                        <input type="checkbox" checked={!isHidden}
+                          onChange={() => setHidden(prev => {
+                            const next = new Set(prev);
+                            if (isHidden) next.delete(term); else next.add(term);
+                            return next;
+                          })}
+                          className="accent-blue-500 w-3.5 h-3.5 shrink-0" />
+                        <span className="text-xs text-zinc-300 flex-1 truncate group-hover:text-zinc-100">{term}</span>
+                        <span className="text-[10px] text-zinc-600 shrink-0">{count}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="h-64">
+        <ResponsiveContainer width="100%" height="100%">
+          {layout === 'vertical' ? (
+            <BarChart data={visibleData} layout="vertical" margin={{ left: 10, right: 30, top: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#27272a" />
+              <XAxis type="number" tick={{ fontSize: 11, fill: '#a1a1aa' }} />
+              <YAxis dataKey="term" type="category" width={150} tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+              <Tooltip contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }} />
+              <Bar dataKey="count" radius={[0, 2, 2, 0]}>
+                {visibleData.map((_, i) => <Cell key={i} fill={`hsl(${barHue}, 82%, ${48 + i * 2}%)`} />)}
+              </Bar>
+            </BarChart>
+          ) : (
+            <BarChart data={visibleData} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#27272a" />
+              <XAxis dataKey="term" tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+              <YAxis tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+              <Tooltip contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }} />
+              <Bar dataKey="count" radius={[2, 2, 0, 0]}>
+                {visibleData.map((_, i) => <Cell key={i} fill={`hsl(${barHue}, 70%, ${45 + i}%)`} />)}
+              </Bar>
+            </BarChart>
+          )}
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// ── ProblemBarChart ────────────────────────────────────────────────────────────
+function ProblemBarChart({
+  title, data, totalReports, barHue, dotColor, onBarClick,
+}: {
+  title: string;
+  data: { term: string; count: number }[];
+  totalReports: number;
+  barHue: number;
+  dotColor: string;
+  onBarClick?: (term: string) => void;
+}) {
+  const [showSettings, setShowSettings] = React.useState(false);
+  const [hidden, setHidden] = React.useState<Set<string>>(new Set());
+  const [limit, setLimit] = React.useState<number>(10);
+  const [copied, setCopied] = React.useState(false);
+  const chartRef = React.useRef<HTMLDivElement>(null);
+  const settingsRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!showSettings) return;
+    const handler = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node))
+        setShowSettings(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showSettings]);
+
+  const visibleData = data.filter(d => !hidden.has(d.term)).slice(0, limit);
+
+  const copyAsImage = async () => {
+    setCopied(true);
+    try {
+      const DPR       = 2;
+      const BAR_H     = 26;
+      const BAR_GAP   = 10;
+      const LABEL_W   = 190;
+      const VAL_W     = 46;
+      const PAD       = { t: 58, r: 24, b: 24, l: 20 };
+      const BAR_AREA  = 340;
+      const maxCount  = Math.max(...visibleData.map(d => d.count), 1);
+
+      const W = PAD.l + LABEL_W + BAR_AREA + VAL_W + PAD.r;
+      const H = PAD.t + visibleData.length * (BAR_H + BAR_GAP) - BAR_GAP + PAD.b;
+
+      const canvas = document.createElement('canvas');
+      canvas.width  = W * DPR;
+      canvas.height = H * DPR;
+      const ctx = canvas.getContext('2d')!;
+      ctx.scale(DPR, DPR);
+
+      ctx.font = `bold 14px system-ui,sans-serif`;
+      ctx.fillStyle = '#111827';
+      ctx.textAlign = 'left';
+      ctx.fillText(title, PAD.l, 22);
+
+      ctx.font = '11px system-ui,sans-serif';
+      ctx.fillStyle = '#6b7280';
+      ctx.fillText(
+        `${limit === Infinity ? 'all' : `top ${visibleData.length}`} · ${totalReports} reports`,
+        PAD.l, 40,
+      );
+
+      const xBar = PAD.l + LABEL_W;
+
+      ctx.strokeStyle = '#d1d5db';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(xBar, PAD.t - 6);
+      ctx.lineTo(xBar, PAD.t + visibleData.length * (BAR_H + BAR_GAP));
+      ctx.stroke();
+
+      visibleData.forEach((item, i) => {
+        const y   = PAD.t + i * (BAR_H + BAR_GAP);
+        const barW = Math.max(4, (item.count / maxCount) * BAR_AREA);
+        const mid  = y + BAR_H / 2 + 4;
+
+        ctx.font = '11px system-ui,sans-serif';
+        ctx.fillStyle = '#374151';
+        ctx.textAlign = 'right';
+        const label = item.term.length > 28 ? item.term.slice(0, 27) + '…' : item.term;
+        ctx.fillText(label, xBar - 8, mid);
+
+        const r = Math.min(3, BAR_H / 2);
+        ctx.fillStyle = `hsl(${barHue}, 82%, ${48 + i * 2}%)`;
+        ctx.beginPath();
+        ctx.moveTo(xBar, y);
+        ctx.lineTo(xBar + barW - r, y);
+        ctx.arcTo(xBar + barW, y, xBar + barW, y + r, r);
+        ctx.arcTo(xBar + barW, y + BAR_H, xBar + barW - r, y + BAR_H, r);
+        ctx.lineTo(xBar, y + BAR_H);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.font = 'bold 11px system-ui,sans-serif';
+        ctx.fillStyle = '#374151';
+        ctx.textAlign = 'left';
+        ctx.fillText(String(item.count), xBar + barW + 6, mid);
+      });
+
+      const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/png'));
+      if (!blob) throw new Error('canvas.toBlob returned null');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${title.replace(/[^a-z0-9]/gi, '_')}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+      console.error('Chart copy failed:', e);
+      setCopied(false);
+    } finally {
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <div className="bg-zinc-950 p-4 rounded-lg shadow-sm border border-zinc-800">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-4">
+        <span className={cn('w-2.5 h-2.5 rounded-full inline-block', dotColor)} />
+        <h3 className="text-sm font-bold text-zinc-100 flex-1">{title}</h3>
+        {onBarClick && <span className="text-[10px] text-zinc-600 italic">click bar to filter</span>}
+        <span className="text-[10px] text-zinc-600">from {totalReports} reports</span>
+        {/* Download */}
+        <button onClick={copyAsImage} title="Download as PNG"
+          className={cn('p-1.5 rounded-md border text-xs font-bold transition-all',
+            copied ? 'bg-emerald-900 border-emerald-700 text-emerald-300' : 'border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800')}>
+          {copied ? '✓' : <Download className="w-3.5 h-3.5" />}
+        </button>
+        {/* Gear */}
+        <div className="relative" ref={settingsRef}>
+          <button onClick={() => setShowSettings(s => !s)} title="Chart settings"
+            className={cn('p-1.5 rounded-md border border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors',
+              showSettings && 'bg-zinc-800 text-zinc-300')}>
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+          {showSettings && (
+            <div className="absolute right-0 top-full mt-2 z-30 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-64 p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-zinc-300">Chart Settings</span>
+                <button onClick={() => setShowSettings(false)} className="text-zinc-600 hover:text-zinc-400"><X className="w-3.5 h-3.5" /></button>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1.5">Show top</p>
+                <div className="flex gap-1.5 flex-wrap">
+                  {([5, 10, 15, 20] as number[]).map(n => (
+                    <button key={n} onClick={() => setLimit(n)}
+                      className={cn('px-2.5 py-1 text-xs rounded border transition-colors',
+                        limit === n ? 'bg-blue-600 border-blue-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500')}>
+                      {n}
+                    </button>
+                  ))}
+                  <button onClick={() => setLimit(Infinity)}
+                    className={cn('px-2.5 py-1 text-xs rounded border transition-colors',
+                      limit === Infinity ? 'bg-blue-600 border-blue-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500')}>
+                    All
+                  </button>
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Items</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => setHidden(new Set())} className="text-[10px] text-zinc-600 hover:text-zinc-300 transition-colors">Select all</button>
+                    <span className="text-zinc-700">·</span>
+                    <button onClick={() => setHidden(new Set(data.map(d => d.term)))} className="text-[10px] text-zinc-600 hover:text-zinc-300 transition-colors">Deselect all</button>
+                  </div>
+                </div>
+                <div className="space-y-1 max-h-52 overflow-y-auto pr-1">
+                  {data.map(({ term, count }) => {
+                    const isHidden = hidden.has(term);
+                    return (
+                      <label key={term} className="flex items-center gap-2 cursor-pointer group">
+                        <input type="checkbox" checked={!isHidden}
+                          onChange={() => setHidden(prev => {
+                            const next = new Set(prev);
+                            if (isHidden) next.delete(term); else next.add(term);
+                            return next;
+                          })}
+                          className="accent-blue-500 w-3.5 h-3.5 shrink-0" />
+                        <span className="text-xs text-zinc-300 flex-1 truncate group-hover:text-zinc-100 leading-tight">{term}</span>
+                        <span className="text-[10px] text-zinc-600 shrink-0">{count}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      {/* Chart */}
+      <div className={cn('h-72', onBarClick && 'cursor-pointer')} ref={chartRef}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={visibleData} layout="vertical" margin={{ left: 10, right: 40, top: 0, bottom: 0 }}
+            onClick={onBarClick ? (chartData: any) => {
+              if (chartData?.activePayload?.[0]?.payload?.term)
+                onBarClick(chartData.activePayload[0].payload.term);
+            } : undefined}
+          >
+            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#27272a" />
+            <XAxis type="number" tick={{ fontSize: 11, fill: '#a1a1aa' }} />
+            <YAxis dataKey="term" type="category" width={170} tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+            <Tooltip
+              contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }}
+              formatter={(value: any, _name: any, props: any) =>
+                onBarClick ? [`${value} reports — click to filter`, ''] : [value, '']
+              }
+            />
+            <Bar dataKey="count" radius={[0, 3, 3, 0]}>
+              {visibleData.map((_, i) => (
+                <Cell key={i} fill={`hsl(${barHue}, 82%, ${48 + i * 2}%)`} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+function SearchScreen({ category, setCategory, store }: { category: Category, setCategory: (c: Category) => void, store: ReturnType<typeof useStore> }) {
+  const [queries, setQueries] = useState<string[]>([]);
+  const [inputValue, setInputValue] = useState('');
+  const [searchedQueries, setSearchedQueries] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any[]>([]);
   const [typesData, setTypesData] = useState<CountResult[]>([]);
   const [timeData, setTimeData] = useState<CountResult[]>([]);
-  const [viewMode, setViewMode] = useState<'list' | 'graph' | 'recalls'>('list');
+  const [viewMode, setViewMode] = useState<'list' | 'graph' | 'recalls' | 'problems'>('list');
   const [recallResults, setRecallResults] = useState<any[]>([]);
   const [recallTimeData, setRecallTimeData] = useState<CountResult[]>([]);
+  const [recallSearchMode, setRecallSearchMode] = useState<'query' | 'identifiers' | null>(null);
+  const [deviceIdentifiers, setDeviceIdentifiers] = useState<DeviceIdentifier[]>([]);
+
   const [error, setError] = useState('');
   const [hasSearched, setHasSearched] = useState(false);
   
-  const { searchHistory, addSearchHistory } = useStore();
+  const { searchHistory, addSearchHistory } = store;
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
 
   // New controls
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(50);
   
-  const [filters, setFilters] = useState({ eventType: '', startDate: '', endDate: '', limit: 500 as number | 'All', sex: '' });
+  type FilterDim = { include: string[]; exclude: string[] };
+  type FiltersState = {
+    eventTypes: FilterDim;
+    manufacturers: FilterDim;
+    deviceNames: FilterDim;
+    eventLocations: FilterDim;
+    reportSources: FilterDim;
+    reporterStates: FilterDim;
+    sexes: FilterDim;
+    patientProblems: FilterDim;
+    productProblems: FilterDim;
+    searchField: string;
+    startDate: string;
+    endDate: string;
+    limit: number | 'All';
+  };
+  const EMPTY_DIM: FilterDim = { include: [], exclude: [] };
+  const EMPTY_FILTERS: FiltersState = {
+    eventTypes: { ...EMPTY_DIM },
+    manufacturers: { ...EMPTY_DIM },
+    deviceNames: { ...EMPTY_DIM },
+    eventLocations: { ...EMPTY_DIM },
+    reportSources: { ...EMPTY_DIM },
+    reporterStates: { ...EMPTY_DIM },
+    sexes: { ...EMPTY_DIM },
+    patientProblems: { ...EMPTY_DIM },
+    productProblems: { ...EMPTY_DIM },
+    searchField: 'auto',
+    startDate: '',
+    endDate: '',
+    limit: 500,
+  };
+  const [filters, setFilters] = useState<FiltersState>(EMPTY_FILTERS);
   const [showFiltersModal, setShowFiltersModal] = useState(false);
+  const [keywordFilter, setKeywordFilter] = useState<{ include: string[]; exclude: string[] }>({ include: [], exclude: [] });
   const [selectedReport, setSelectedReport] = useState<any>(null);
+  // { query → { fieldKey, label, fallback } }
+  const [queryFieldsUsed, setQueryFieldsUsed] = useState<Record<string, { fieldKey: string; label: string; fallback: boolean }>>({});
+
+  // ── Per-category state snapshot cache ──────────────────────────────────────
+  const prevCategory = React.useRef<Category>(category);
+  const categoryCache = React.useRef<Partial<Record<Category, any>>>({});
 
   useEffect(() => {
-    setQuery('');
-    setResults([]);
-    setTypesData([]);
-    setTimeData([]);
-    setRecallResults([]);
-    setRecallTimeData([]);
-    setHasSearched(false);
-    setError('');
-    setCurrentPage(1);
-    setFilters({ eventType: '', startDate: '', endDate: '', limit: 500 as number | 'All', sex: '' });
-  }, [category]);
+    const prev = prevCategory.current;
+    if (prev === category) return;
+
+    // Save current state under the category we're leaving
+    categoryCache.current[prev] = {
+      queries, inputValue, searchedQueries, results, typesData, timeData,
+      viewMode, recallResults, recallTimeData, recallSearchMode, deviceIdentifiers, hasSearched, filters,
+      currentPage, queryFieldsUsed, error,
+    };
+
+    // Restore or reset for the category we're entering
+    const saved = categoryCache.current[category];
+    if (saved) {
+      setQueries(saved.queries);
+      setInputValue(saved.inputValue);
+      setSearchedQueries(saved.searchedQueries);
+      setResults(saved.results);
+      setTypesData(saved.typesData);
+      setTimeData(saved.timeData);
+      setViewMode(saved.viewMode);
+      setRecallResults(saved.recallResults);
+      setRecallTimeData(saved.recallTimeData);
+      setRecallSearchMode(saved.recallSearchMode ?? null);
+      setDeviceIdentifiers(saved.deviceIdentifiers || []);
+
+      setHasSearched(saved.hasSearched);
+      setFilters(saved.filters);
+      setCurrentPage(saved.currentPage);
+      setQueryFieldsUsed(saved.queryFieldsUsed);
+      setError(saved.error);
+    } else {
+      // Fresh slate for a category we've never visited
+      setQueries([]);
+      setInputValue('');
+      setSearchedQueries([]);
+      setResults([]);
+      setTypesData([]);
+      setTimeData([]);
+      setViewMode('list');
+      setKeywordFilter({ include: [], exclude: [] });
+      setRecallResults([]);
+      setRecallTimeData([]);
+      setRecallSearchMode(null);
+      setDeviceIdentifiers([]);
+
+      setHasSearched(false);
+      setFilters(EMPTY_FILTERS);
+      setCurrentPage(1);
+      setQueryFieldsUsed({});
+      setError('');
+    }
+
+    prevCategory.current = category;
+  }, [category]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const categories: { id: Category, label: string, icon: any }[] = [
     { id: 'drug', label: 'Drugs', icon: Activity },
@@ -164,16 +661,41 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
   ];
 
   const suggestions = searchHistory
-      .filter(h => h.category === category && h.query.toLowerCase().includes(query.toLowerCase()))
+      .filter(h => h.category === category && inputValue && h.query.toLowerCase().includes(inputValue.toLowerCase()))
       .slice(0, 5)
-      .map(h => h.query);
+      .map(h => h.query)
+      .filter(s => !queries.includes(s));
 
-  const handleSearch = async (e?: React.FormEvent, explicitQuery?: string) => {
+  // Commit the current inputValue as a pill
+  const commitInput = (): string[] => {
+    const val = inputValue.trim();
+    if (!val || queries.includes(val)) return queries;
+    const next = [...queries, val];
+    setQueries(next);
+    setInputValue('');
+    return next;
+  };
+
+  const removeQuery = (idx: number) => setQueries(q => q.filter((_, i) => i !== idx));
+
+  const handleSearch = async (e?: React.FormEvent, fromQueries?: string[]) => {
     if (e) e.preventDefault();
-    const searchQuery = explicitQuery !== undefined ? explicitQuery : query;
-    if (!searchQuery.trim()) return;
+    // Commit any pending input before searching
+    const effectiveQueries = fromQueries ?? (() => {
+      const val = inputValue.trim();
+      if (val && !queries.includes(val)) {
+        const next = [...queries, val];
+        setQueries(next);
+        setInputValue('');
+        return next;
+      }
+      return queries;
+    })();
 
-    setQuery(searchQuery);
+    if (effectiveQueries.length === 0) return;
+
+    setSearchedQueries(effectiveQueries);
+    setQueryFieldsUsed({});
     setShowSuggestions(false);
     setLoading(true);
     setError('');
@@ -183,51 +705,111 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
     setTimeData([]);
     setRecallResults([]);
     setRecallTimeData([]);
+    setRecallSearchMode(null);
+    setDeviceIdentifiers([]);
+
     setCurrentPage(1);
-    
-    addSearchHistory(category, searchQuery.trim());
+
+    const primaryQuery = effectiveQueries[0];
 
     try {
-      fetchFDACounts(category, searchQuery, 'types').then(countsTypes => {
-         if (countsTypes?.results) setTypesData(countsTypes.results.slice(0, 10));
-      });
-      fetchFDACounts(category, searchQuery, 'time').then(countsTime => {
-         if (countsTime?.results) setTimeData(countsTime.results);
-      });
+      const seenIds = new Set<string>();
+      let allResults: any[] = [];
+      const limitToFetch = filters.limit === 'All' ? Infinity : (filters.limit as number);
+      const perQueryLimit = Math.ceil(limitToFetch === Infinity ? Infinity : limitToFetch / effectiveQueries.length);
 
-      if (category === 'device') {
-          fetchDeviceRecallCounts(searchQuery, 'time').then(counts => {
-             if (counts?.results) setRecallTimeData(counts.results);
-          });
-          fetchDeviceRecalls(searchQuery, 0, 100).then(recalls => {
-             if (recalls?.results) setRecallResults(recalls.results);
-          });
+      for (const q of effectiveQueries) {
+        addSearchHistory(category, q);
+
+        // --- Step 1: determine initial field group ---
+        const manualField = filters.searchField !== 'auto' ? filters.searchField : null;
+        let fieldKey = manualField ?? detectQueryFieldKey(category, q);
+        let searchFields = resolveSearchFields(category, fieldKey);
+        const fieldGroups = SEARCH_FIELD_GROUPS[category];
+        const fieldLabel = fieldGroups?.[fieldKey]?.label ?? 'Auto';
+
+        // --- Step 2: quick probe to check if fields yield results ---
+        let fallbackUsed = false;
+        if (!manualField) {
+          const probe = await fetchFDAData(category, q, 0, 1, searchFields);
+          if ((probe?.results?.length ?? 0) === 0) {
+            // Try all other field groups in parallel
+            const fallbackKey = await probeFallbackFields(category, q, fieldKey);
+            if (fallbackKey) {
+              fieldKey = fallbackKey;
+              searchFields = resolveSearchFields(category, fieldKey);
+              fallbackUsed = true;
+            }
+          }
+        }
+
+        setQueryFieldsUsed(prev => ({
+          ...prev,
+          [q]: { fieldKey, label: fieldGroups?.[fieldKey]?.label ?? fieldKey, fallback: fallbackUsed }
+        }));
+
+        // Fire chart fetches for primary query using resolved fields
+        if (q === primaryQuery) {
+          fetchFDACounts(category, q, 'types', searchFields).then(c => { if (c?.results) setTypesData(c.results.slice(0, 10)); });
+          fetchFDACounts(category, q, 'time', searchFields).then(c => { if (c?.results) setTimeData(c.results); });
+            // Extract device identifiers from accumulated results for recall cross-linking
+            if (category === 'device') {
+              // We fire recall fetches after first page results arrive so we have identifiers
+              // This runs after allResults is populated from first batch
+            }
+
+        }
+
+        // --- Step 3: paginated fetch with resolved fields ---
+        let skip = 0;
+        let remaining = perQueryLimit;
+        while (skip < remaining) {
+          const toFetch = Math.min(500, remaining - skip);
+          const resData = await fetchFDAData(category, q, skip, toFetch, searchFields);
+          if (resData?.results) {
+            for (const item of resData.results) {
+              const id = item.mdr_report_key || item.safetyreportid || item.report_number || item.report_id || JSON.stringify(item).slice(0, 64);
+              if (!seenIds.has(id)) {
+                seenIds.add(id);
+                allResults.push(item);
+              }
+            }
+            setResults([...allResults]);
+
+            // After first page arrives, extract device identifiers and fire recall searches
+            if (skip === 0 && category === 'device' && q === primaryQuery) {
+              const ids = extractDeviceIdentifiers(allResults);
+              setDeviceIdentifiers(ids);
+              const mfrGrps = store.mfrGroups;
+
+              // Strategy 1: try direct product-name search (same as MAUDE query)
+              const directRecalls = await fetchDeviceRecalls([], q, 0, 100, mfrGrps);
+              if (directRecalls?.results?.length) {
+                setRecallResults(directRecalls.results);
+                setRecallSearchMode('query');
+                fetchDeviceRecallCounts([], q, 'time', mfrGrps).then(c => { if (c?.results) setRecallTimeData(c.results); });
+              } else {
+                // Strategy 2: tiered identifier-based search
+                const idRecalls = await fetchDeviceRecalls(ids, q, 0, 100, mfrGrps);
+                if (idRecalls?.results?.length) {
+                  setRecallResults(idRecalls.results);
+                  setRecallSearchMode('identifiers');
+                  fetchDeviceRecallCounts(ids, q, 'time', mfrGrps).then(c => { if (c?.results) setRecallTimeData(c.results); });
+                } else {
+                  setRecallResults([]);
+                  setRecallSearchMode(null);
+                }
+              }
+            }
+
+            if (resData.results.length < toFetch) break;
+            if (skip === 0 && resData.meta?.results?.total) {
+              remaining = Math.min(remaining, resData.meta.results.total);
+            }
+          } else { break; }
+          skip += toFetch;
+        }
       }
-
-      let fetchedResults: any[] = [];
-      let skip = 0;
-      let limitToFetch = filters.limit === 'All' ? Infinity : (filters.limit as number);
-
-      while (skip < limitToFetch) {
-         let toFetch = Math.min(500, limitToFetch - skip);
-         const resData = await fetchFDAData(category, searchQuery, skip, toFetch);
-         
-         if (resData?.results) {
-             fetchedResults = [...fetchedResults, ...resData.results];
-             setResults(fetchedResults);
-             
-             if (resData.results.length < toFetch) {
-                 break;
-             }
-             if (skip === 0 && resData.meta?.results?.total) {
-                limitToFetch = Math.min(limitToFetch, resData.meta.results.total);
-             }
-         } else {
-             break;
-         }
-         skip += toFetch;
-      }
-      
     } catch (err: any) {
       setError(err.message || 'An error occurred while fetching data');
     } finally {
@@ -252,15 +834,45 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
      const url = URL.createObjectURL(blob);
      const link = document.createElement("a");
      link.setAttribute("href", url);
-     link.setAttribute("download", `biogrid_${category}_${query}.csv`);
+     link.setAttribute("download", `biogrid_${category}_${searchedQueries.join('_')}.csv`);
      document.body.appendChild(link);
      link.click();
      document.body.removeChild(link);
   };
 
+  // Helper: apply a FilterDim (include/exclude) against a list of values for this record
+  const applyDim = (dim: { include: string[]; exclude: string[] }, vals: string[]) => {
+    if (dim.include.length > 0 && !vals.some(v => dim.include.includes(v))) return false;
+    if (dim.exclude.length > 0 && vals.some(v => dim.exclude.includes(v))) return false;
+    return true;
+  };
+
   const filteredResults = results.filter(r => {
       const parsed = parseReport(category, r);
-      if (filters.eventType && !parsed.events.some(e => e.toLowerCase().includes(filters.eventType.toLowerCase()))) return false;
+      if (!applyDim(filters.eventTypes, parsed.events)) return false;
+      if (!applyDim(filters.manufacturers, [r.device?.[0]?.manufacturer_d_name || ''])) return false;
+      if (!applyDim(filters.deviceNames, [r.device?.[0]?.generic_name || ''])) return false;
+      if (!applyDim(filters.eventLocations, [r.event_location || ''])) return false;
+      if (!applyDim(filters.reportSources, [r.report_source_code || ''])) return false;
+      if (!applyDim(filters.reporterStates, [r.reporter_state_code || ''])) return false;
+      if (!applyDim(filters.sexes, [parsed.patient?.sex || ''])) return false;
+      // Patient & product problem filters
+      if (filters.patientProblems.include.length > 0) {
+          const pp = parsed.patientProblems as string[];
+          if (!filters.patientProblems.include.some((inc: string) => pp.includes(inc))) return false;
+      }
+      if (filters.patientProblems.exclude.length > 0) {
+          const pp = parsed.patientProblems as string[];
+          if (filters.patientProblems.exclude.some((exc: string) => pp.includes(exc))) return false;
+      }
+      if (filters.productProblems.include.length > 0) {
+          const dp = parsed.deviceProblems as string[];
+          if (!filters.productProblems.include.some((inc: string) => dp.includes(inc))) return false;
+      }
+      if (filters.productProblems.exclude.length > 0) {
+          const dp = parsed.deviceProblems as string[];
+          if (filters.productProblems.exclude.some((exc: string) => dp.includes(exc))) return false;
+      }
       if (filters.startDate) {
           const s = filters.startDate.replace(/-/g, '');
           const d = (parsed.date as string).replace(/-/g, '');
@@ -271,12 +883,63 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
           const d = (parsed.date as string).replace(/-/g, '');
           if (d > e) return false;
       }
-      if (filters.sex && parsed.patient?.sex?.toLowerCase() !== filters.sex.toLowerCase()) return false;
       return true;
   });
 
-  const totalPages = Math.ceil(filteredResults.length / rowsPerPage);
-  const paginatedResults = filteredResults.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
+  // ── Keyword filter (client-side full-text) ────────────────────────────────
+  const getReportText = (r: any): string => {
+    const parsed = parseReport(category, r);
+    return [
+      parsed.title,
+      parsed.description,
+      parsed.narrative,
+      ...(parsed.events ?? []),
+      ...(parsed.deviceProblems ?? []),
+      ...(parsed.patientProblems ?? []),
+      r.device?.[0]?.manufacturer_d_name,
+      r.device?.[0]?.brand_name,
+      r.device?.[0]?.generic_name,
+      r.device?.[0]?.model_number,
+      r.device?.[0]?.lot_number,
+      r.report_source_code,
+      r.reporter_state_code,
+      r.event_location,
+      r.mdr_report_key,
+      r.safetyreportid,
+      r.report_number,
+    ].filter(Boolean).join(' ').toLowerCase();
+  };
+
+  const keywordFilteredResults = React.useMemo(() => {
+    const { include, exclude } = keywordFilter;
+    if (include.length === 0 && exclude.length === 0) return filteredResults;
+    return filteredResults.filter(r => {
+      const text = getReportText(r);
+      // All include keywords must match
+      if (include.length > 0 && !include.every(kw => text.includes(kw.toLowerCase()))) return false;
+      // No exclude keyword may match
+      if (exclude.length > 0 && exclude.some(kw => text.includes(kw.toLowerCase()))) return false;
+      return true;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredResults, keywordFilter]);
+
+  const totalPages = Math.ceil(keywordFilteredResults.length / rowsPerPage);
+  const paginatedResults = keywordFilteredResults.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
+
+  // Aggregate product & patient problems from loaded results for analytics charts
+  const { productProblemData, patientProblemData } = React.useMemo(() => {
+    const pp: Record<string, number> = {};
+    const pt: Record<string, number> = {};
+    for (const r of filteredResults) {
+      const parsed = parseReport(category, r);
+      (parsed.deviceProblems ?? []).forEach((v: string) => { if (v) pp[v] = (pp[v] || 0) + 1; });
+      (parsed.patientProblems ?? []).forEach((v: string) => { if (v) pt[v] = (pt[v] || 0) + 1; });
+    }
+    const toBar = (counts: Record<string, number>) =>
+      Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([term, count]) => ({ term, count }));
+    return { productProblemData: toBar(pp), patientProblemData: toBar(pt) };
+  }, [keywordFilteredResults, category]);
 
   return (
     <div className="flex flex-col h-full bg-zinc-950">
@@ -287,41 +950,59 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
         </div>
         
         <form onSubmit={e => handleSearch(e)} className="flex items-center w-full max-w-5xl relative">
-            <div className="flex-1 relative flex items-center shadow-sm">
-                <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-6 h-6 text-zinc-500 pointer-events-none" />
-                
-                <input 
-                    type="text" 
-                    value={query}
-                    onChange={e => {
-                        setQuery(e.target.value);
-                        setShowSuggestions(true);
-                    }}
+            {/* Multi-query pill input */}
+            <div
+                className="flex-1 relative flex items-center flex-wrap gap-2 bg-zinc-900 border border-zinc-800 rounded-full px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-zinc-700 cursor-text min-h-[56px]"
+                onClick={() => inputRef.current?.focus()}
+            >
+                <Search className="w-5 h-5 text-zinc-500 shrink-0 self-center" />
+
+                {/* Pills */}
+                {queries.map((q, i) => (
+                    <span key={i} className="flex items-center gap-1.5 bg-zinc-700 text-zinc-100 text-sm font-medium pl-3 pr-2 py-1 rounded-full shrink-0">
+                        {q}
+                        <button
+                            type="button"
+                            onClick={e => { e.stopPropagation(); removeQuery(i); }}
+                            className="text-zinc-400 hover:text-zinc-100 transition-colors"
+                        >
+                            <X className="w-3.5 h-3.5" />
+                        </button>
+                    </span>
+                ))}
+
+                {/* Text input */}
+                <input
+                    ref={inputRef}
+                    type="text"
+                    value={inputValue}
+                    onChange={e => { setInputValue(e.target.value); setShowSuggestions(true); }}
                     onFocus={() => setShowSuggestions(true)}
                     onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-                    placeholder={`Search ${categories.find(c => c.id === category)?.label} by name...`}
-                    className="w-full pl-14 pr-32 py-4 bg-zinc-900 border border-zinc-800 rounded-full text-lg focus:outline-none focus:ring-2 focus:ring-zinc-700 text-zinc-100 block transition-all placeholder:text-zinc-500"
+                    onKeyDown={e => {
+                        if ((e.key === 'Enter' || e.key === ',') && inputValue.trim()) {
+                            e.preventDefault();
+                            commitInput();
+                        } else if (e.key === 'Backspace' && !inputValue && queries.length > 0) {
+                            removeQuery(queries.length - 1);
+                        }
+                    }}
+                    placeholder={queries.length === 0
+                        ? `Search ${categories.find(c => c.id === category)?.label} by name…`
+                        : 'Add another query…'}
+                    className="flex-1 min-w-36 bg-transparent text-base focus:outline-none text-zinc-100 placeholder:text-zinc-500 self-center"
                 />
-                
-                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2 z-10">
-                    <button 
-                         type="button" 
-                         onClick={() => setShowFiltersModal(true)} 
-                         className="p-2.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 rounded-full transition-colors flex items-center justify-center relative"
-                         title="Filters"
-                    >
-                        <Filter className="w-5 h-5" />
-                        {(filters.eventType || filters.startDate || filters.endDate || filters.sex || filters.limit !== 500) && (
-                            <span className="w-2 h-2 rounded-full bg-zinc-100 absolute top-1.5 right-1.5"></span>
-                        )}
-                    </button>
-                    {query.length > 0 && (
-                        <button 
-                            type="submit" 
+
+                {/* Right-side controls */}
+                <div className="flex items-center gap-2 shrink-0 self-center ml-auto">
+                    {(queries.length > 0 || inputValue.trim()) && (
+                        <button
+                            type="submit"
                             disabled={loading}
-                            className="p-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-full transition-colors shadow-sm disabled:opacity-50 flex items-center justify-center"
+                            className="flex items-center gap-2 px-4 py-2 bg-zinc-100 text-zinc-950 font-semibold rounded-full text-sm hover:bg-zinc-200 transition-colors disabled:opacity-50 shrink-0"
                         >
-                            <Search className="w-5 h-5" />
+                            <Search className="w-4 h-4" />
+                            {queries.length > 1 || (queries.length === 1 && inputValue.trim()) ? `Search ${queries.length + (inputValue.trim() ? 1 : 0)}` : 'Search'}
                         </button>
                     )}
                 </div>
@@ -333,14 +1014,19 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
                             <button
                                 key={idx}
                                 type="button"
-                                onMouseDown={(e) => {
+                                onMouseDown={e => {
                                     e.preventDefault();
-                                    handleSearch(undefined, suggestion);
+                                    // Add suggestion as a pill and search
+                                    const next = queries.includes(suggestion) ? queries : [...queries, suggestion];
+                                    setQueries(next);
+                                    setInputValue('');
+                                    handleSearch(undefined, next);
                                 }}
                                 className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-zinc-800 transition-colors border-b border-zinc-800 last:border-b-0"
                             >
                                 <History className="w-4 h-4 text-zinc-500" />
                                 <span className="text-zinc-100 font-medium">{suggestion}</span>
+                                <span className="ml-auto text-xs text-zinc-600">+ add query</span>
                             </button>
                         ))}
                     </div>
@@ -371,17 +1057,20 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
             </div>
          ) : (
             <div className="max-w-7xl mx-auto space-y-6">
-                {/* View Mode Tabs */}
-                <div className="flex bg-zinc-900/50 w-max p-1.5 rounded-xl border border-zinc-800 shadow-sm mx-auto mb-6">
-                    <button onClick={() => setViewMode('list')} className={cn("flex items-center gap-2 px-8 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'list' ? 'bg-zinc-800 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
-                        <ListIcon className="w-4 h-4" /> List View
+                {/* View Mode Tabs — full width */}
+                <div className="flex bg-zinc-900/50 p-1.5 rounded-xl border border-zinc-800 shadow-sm mb-6">
+                    <button onClick={() => setViewMode('list')} className={cn("flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'list' ? 'bg-zinc-800 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
+                        <ListIcon className="w-4 h-4" /> List
                     </button>
-                    <button onClick={() => setViewMode('graph')} className={cn("flex items-center gap-2 px-8 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'graph' ? 'bg-zinc-800 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
-                        <PieChart className="w-4 h-4" /> Analytics & Graphs
+                    <button onClick={() => setViewMode('graph')} className={cn("flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'graph' ? 'bg-zinc-800 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
+                        <PieChart className="w-4 h-4" /> Analytics
+                    </button>
+                    <button onClick={() => setViewMode('problems')} className={cn("flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'problems' ? 'bg-zinc-800 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
+                        <Share2 className="w-4 h-4" /> Problems
                     </button>
                     {category === 'device' && (
-                        <button onClick={() => setViewMode('recalls')} className={cn("flex items-center gap-2 px-8 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'recalls' ? 'bg-zinc-800 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
-                            <AlertTriangle className="w-4 h-4" /> Device Recalls
+                        <button onClick={() => setViewMode('recalls')} className={cn("flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'recalls' ? 'bg-zinc-800 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
+                            <AlertTriangle className="w-4 h-4" /> Recalls
                         </button>
                     )}
                 </div>
@@ -389,10 +1078,44 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
                <div className="flex items-center justify-between bg-zinc-950 px-4 py-3 rounded-lg shadow-sm border border-zinc-800 sticky top-0 z-10">
                   <div className="flex items-center gap-3 px-2 text-sm">
                      {loading && <div className="w-4 h-4 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin"></div>}
-                     <span>
-                        <span className="font-bold text-zinc-100">{filteredResults.length}</span> 
-                        <span className="text-zinc-500 ml-1">reports for "<span className="text-zinc-100 font-semibold">{query}</span>"</span>
-                     </span>
+                      <span className="flex items-center gap-2 flex-wrap">
+                         <span className="font-bold text-zinc-100">{keywordFilteredResults.length}</span>
+                         {keywordFilteredResults.length !== filteredResults.length && (
+                           <span className="text-zinc-600 text-xs">(of {filteredResults.length})</span>
+                         )}
+                         <span className="text-zinc-500">results for</span>
+                         {searchedQueries.map((q, i) => {
+                           const qf = queryFieldsUsed[q];
+                           return (
+                             <span key={i} className="inline-flex items-center gap-1.5 text-xs font-semibold rounded-full border px-2.5 py-1"
+                               style={{ background: qf?.fallback ? 'rgba(234,179,8,0.1)' : 'rgba(63,63,70,0.6)', borderColor: qf?.fallback ? 'rgba(234,179,8,0.3)' : 'rgba(63,63,70,1)', color: qf?.fallback ? '#eab308' : '#e4e4e7' }}
+                             >
+                               <Search className="w-3 h-3 opacity-60" />
+                               {q}
+                               {qf && <span className="opacity-60">· {qf.label}{qf.fallback ? ' ⚡' : ''}</span>}
+                             </span>
+                           );
+                         })}
+                          {/* Date range pill */}
+                          {(filters.startDate || filters.endDate) && (
+                            <button
+                              onClick={() => setShowFiltersModal(true)}
+                              className="inline-flex items-center gap-1.5 text-xs font-semibold rounded-full border px-2.5 py-1 bg-violet-950/60 border-violet-800 text-violet-300 hover:bg-violet-900/50 transition-colors"
+                            >
+                              <Calendar className="w-3 h-3 opacity-80" />
+                              {filters.startDate && filters.endDate
+                                ? `${filters.startDate} → ${filters.endDate}`
+                                : filters.startDate
+                                ? `From ${filters.startDate}`
+                                : `To ${filters.endDate}`}
+                              <button
+                                onClick={e => { e.stopPropagation(); setFilters((f: any) => ({ ...f, startDate: '', endDate: '' })); }}
+                                className="ml-0.5 opacity-60 hover:opacity-100"
+                              >×</button>
+                            </button>
+                          )}
+                         {loading && <span className="text-xs text-zinc-600 animate-pulse">searching…</span>}
+                      </span>
                   </div>
                   
                   <div className="flex items-center gap-4">
@@ -417,9 +1140,24 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
                {/* Results Views */}
                {viewMode === 'list' && (
                    <div className="space-y-4">
+                       {/* Keyword search bar */}
+                       <KeywordSearchBar
+                         keywordFilter={keywordFilter}
+                         setKeywordFilter={setKeywordFilter}
+                         totalResults={filteredResults.length}
+                         matchCount={keywordFilteredResults.length}
+                       />
+                       {/* Quick filter bar — expanded inline filters + More button */}
+                       <QuickFilterBar
+                         filters={filters}
+                         setFilters={setFilters}
+                         results={results}
+                         category={category}
+                         onOpenMore={() => setShowFiltersModal(true)}
+                       />
                        <div className="grid grid-cols-1 gap-4">
                            {paginatedResults.map((r, i) => (
-                               <ReportCard key={i} rawReport={r} category={category} onClick={() => setSelectedReport(r)} />
+                                <ReportCard key={i} rawReport={r} category={category} onClick={() => setSelectedReport(r)} store={store} />
                            ))}
                            {paginatedResults.length === 0 && !loading && (
                                <div className="text-center py-20 text-zinc-500 font-medium bg-zinc-950 rounded-lg border border-zinc-800">No results found matching your filters.</div>
@@ -440,113 +1178,98 @@ function SearchScreen({ category, setCategory }: { category: Category, setCatego
                )}
                {viewMode === 'graph' && (
                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                       <div className="bg-zinc-950 p-4 rounded-lg shadow-sm border border-zinc-800">
-                           <h3 className="text-sm font-bold text-zinc-100 mb-4 flex items-center gap-2">
-                               <AlertTriangle className="w-4 h-4 text-amber-500" />
-                               Top Reported Issues
-                           </h3>
-                           <div className="h-64">
-                               <ResponsiveContainer width="100%" height="100%">
-                                  <BarChart data={typesData} layout="vertical" margin={{ left: 10, right: 30, top: 0, bottom: 0 }}>
-                                      <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#27272a" />
-                                      <XAxis type="number" tick={{fontSize: 11, fill: '#a1a1aa'}} />
-                                      <YAxis dataKey="term" type="category" width={150} tick={{fontSize: 11, fill: '#a1a1aa'}} />
-                                      <Tooltip contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', boxShadow: '0 1px 2px 0 rgb(0 0 0 / 0.05)', fontSize: '12px', color: '#fafaed' }} />
-                                      <Bar dataKey="count" fill="#2563eb" radius={[0, 2, 2, 0]}>
-                                        {typesData.map((entry, index) => (
-                                          <Cell key={`cell-${index}`} fill={`hsl(217, 91%, ${50 + (index * 4)}%)`} />
-                                        ))}
-                                      </Bar>
-                                  </BarChart>
-                               </ResponsiveContainer>
-                           </div>
-                       </div>
-                       
-                       <div className="bg-zinc-950 p-4 rounded-lg shadow-sm border border-zinc-800">
-                           <h3 className="text-sm font-bold text-zinc-100 mb-4 flex items-center gap-2">
-                               <Clock className="w-4 h-4 text-zinc-100" />
-                               Reports Over Time
-                           </h3>
-                           <div className="h-64">
-                               <ResponsiveContainer width="100%" height="100%">
-                                  <BarChart data={timeData.slice(-30)} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
-                                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#27272a" />
-                                      <XAxis dataKey="time" tickFormatter={(v) => String(v).substring(0,4)} tick={{fontSize: 11, fill: '#a1a1aa'}} />
-                                      <YAxis tick={{fontSize: 11, fill: '#a1a1aa'}} />
-                                      <Tooltip labelFormatter={(v) => `Date: ${v}`} contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', boxShadow: '0 1px 2px 0 rgb(0 0 0 / 0.05)', fontSize: '12px', color: '#fafaed' }} />
-                                      <Bar dataKey="count" fill="#10b981" radius={[2, 2, 0, 0]} />
-                                  </BarChart>
-                               </ResponsiveContainer>
-                           </div>
-                       </div>
-                   </div>
+                        <SimpleFilterChart
+                          title="Top Reported Issues"
+                          icon={<AlertTriangle className="w-4 h-4 text-amber-500" />}
+                          data={typesData}
+                          barHue={217}
+                          layout="vertical"
+                        />
+
+                        <SimpleFilterChart
+                          title="Reports Over Time"
+                          icon={<Clock className="w-4 h-4 text-zinc-400" />}
+                          data={timeData.map(d => ({ term: String(d.time ?? d.term ?? '').substring(0,4), count: d.count }))}
+                          barHue={160}
+                          layout="horizontal"
+                        />
+
+                        {productProblemData.length > 0 && (
+                            <ProblemBarChart
+                                title="Top Product Problems"
+                                data={productProblemData}
+                                totalReports={filteredResults.length}
+                                barHue={38}
+                                dotColor="bg-amber-500"
+                                onBarClick={(term) => {
+                                    setFilters(f => ({ ...f, productProblems: { include: [term], exclude: [] } }));
+                                    setViewMode('list');
+                                }}
+                            />
+                        )}
+
+                        {/* Patient Problems chart */}
+                        {patientProblemData.length > 0 && (
+                            <ProblemBarChart
+                                title="Top Patient Problems"
+                                data={patientProblemData}
+                                totalReports={filteredResults.length}
+                                barHue={345}
+                                dotColor="bg-rose-500"
+                            />
+                        )}
+                    </div>
                )}
+                {viewMode === 'problems' && (
+                    <ProblemsView
+                      results={filteredResults}
+                      category={category}
+                      onProductProblemClick={(code) => {
+                        setFilters(f => ({ ...f, productProblems: { include: [code], exclude: [] } }));
+                        setViewMode('list');
+                      }}
+                      onPatientProblemClick={(code) => {
+                        setFilters(f => ({ ...f, patientProblems: { include: [code], exclude: [] } }));
+                        setViewMode('list');
+                      }}
+                    />
+                )}
                {viewMode === 'recalls' && (
-                   <div className="space-y-6">
-                       <div className="bg-zinc-950 p-4 rounded-lg shadow-sm border border-zinc-800">
-                           <h3 className="text-sm font-bold text-zinc-100 mb-4 flex items-center gap-2">
-                               <Clock className="w-4 h-4 text-zinc-100" />
-                               Recalls Over Time (When Issued)
-                           </h3>
-                           <div className="h-64">
-                               <ResponsiveContainer width="100%" height="100%">
-                                  <BarChart data={recallTimeData.slice(-30)} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
-                                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#27272a" />
-                                      <XAxis dataKey="time" tickFormatter={(v) => String(v).substring(0,4)} tick={{fontSize: 11, fill: '#a1a1aa'}} />
-                                      <YAxis tick={{fontSize: 11, fill: '#a1a1aa'}} />
-                                      <Tooltip labelFormatter={(v) => `Date: ${v}`} contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', boxShadow: '0 1px 2px 0 rgb(0 0 0 / 0.05)', fontSize: '12px', color: '#fafaed' }} />
-                                      <Bar dataKey="count" fill="#f43f5e" radius={[2, 2, 0, 0]} />
-                                  </BarChart>
-                               </ResponsiveContainer>
-                           </div>
-                       </div>
-                       <div className="grid grid-cols-1 gap-4">
-                           <h3 className="text-sm font-bold text-zinc-100 mb-2 flex items-center gap-2">
-                               Latest Recall Documents
-                           </h3>
-                           {recallResults.slice(0, 50).map((r, i) => (
-                               <div key={i} className="bg-zinc-950 border border-zinc-800 rounded-lg p-5 shadow-sm text-left hover:border-zinc-700 transition">
-                                   <div className="flex gap-2 items-start justify-between mb-3">
-                                        <h3 className="font-bold text-zinc-100 text-base">{r.product_description || 'Unknown Product'}</h3>
-                                        <span className={cn("px-2 py-1 rounded text-xs font-bold uppercase tracking-wider shrink-0", 
-                                            r.recall_status === 'Ongoing' ? "bg-amber-950 text-amber-500 border border-amber-900" 
-                                            : r.recall_status === 'Terminated' ? "bg-emerald-950 text-emerald-500 border border-emerald-900"
-                                            : "bg-zinc-900 text-zinc-400 border border-zinc-700"
-                                        )}>
-                                            {r.recall_status || 'Unknown'}
-                                        </span>
-                                   </div>
-                                   <div className="grid grid-cols-2 gap-4 text-sm mb-4">
-                                       <div><span className="text-zinc-500 font-semibold uppercase text-xs tracking-wider">Recalling Firm:</span> <span className="text-zinc-300">{r.recalling_firm}</span></div>
-                                       <div><span className="text-zinc-500 font-semibold uppercase text-xs tracking-wider">Date Initiated:</span> <span className="text-zinc-300">{formatDate(r.event_date_initiated)}</span></div>
-                                   </div>
-                                   <div>
-                                       <span className="text-zinc-500 font-semibold uppercase text-xs tracking-wider block mb-1">Reason for Recall:</span>
-                                       <p className="text-zinc-300 text-sm leading-relaxed">{r.reason_for_recall || 'No reason provided'}</p>
-                                   </div>
-                               </div>
-                           ))}
-                           {recallResults.length === 0 && !loading && (
-                               <div className="text-center py-10 text-zinc-500 font-medium bg-zinc-950 rounded-lg border border-zinc-800">No recalls found matching your filters.</div>
-                           )}
-                       </div>
-                   </div>
+                   <RecallsView
+                     recallResults={recallResults}
+                     recallTimeData={recallTimeData}
+                     deviceIdentifiers={deviceIdentifiers}
+                     mfrGroups={store.mfrGroups}
+                     onSaveMfrGroup={store.saveMfrGroup}
+                     onRemoveMfrGroup={store.removeMfrGroup}
+                     recallSearchMode={recallSearchMode}
+                     searchQuery={searchedQueries[0] ?? ''}
+                     loading={loading}
+                   />
                )}
             </div>
          )}
          
-         {showFiltersModal && <FiltersModal filters={filters} setFilters={setFilters} onClose={() => setShowFiltersModal(false)} />}
-         {selectedReport && <ReportModal rawReport={selectedReport} category={category} onClose={() => setSelectedReport(null)} />}
+         {showFiltersModal && <FiltersModal filters={filters} setFilters={setFilters} onClose={() => setShowFiltersModal(false)} results={results} category={category} />}
+         {selectedReport && <ReportModal rawReport={selectedReport} category={category} onClose={() => setSelectedReport(null)} store={store} />}
       </div>
     </div>
   );
 }
 
-const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () => void }> = ({ rawReport, category, onClick }) => {
-    const { saveReport, folders } = useStore();
+const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () => void, store: ReturnType<typeof useStore> }> = ({ rawReport, category, onClick, store }) => {
+    const { saveReport, savedReports, folders } = store;
     const parsed = parseReport(category, rawReport);
-    const [isSaved, setIsSaved] = useState(false);
-    
+    const [justSaved, setJustSaved] = useState(false);
+
+    // Check if already saved
+    const existingSave = savedReports.find(r => r.id === parsed.id);
+    const savedFolder = existingSave
+        ? (existingSave.folderId === 'archive'
+            ? 'Archive'
+            : folders.find(f => f.id === existingSave.folderId)?.name ?? 'Uncategorized')
+        : null;
+
     const handleSave = () => {
         saveReport({
             id: parsed.id,
@@ -557,37 +1280,45 @@ const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () =>
             notes: '',
             folderId: null
         });
-        setIsSaved(true);
-        setTimeout(() => setIsSaved(false), 2000);
+        setJustSaved(true);
+        setTimeout(() => setJustSaved(false), 2000);
     };
 
     return (
-        <div onClick={onClick} className="bg-zinc-950 border text-sm border-zinc-800 hover:border-zinc-600 rounded-lg p-4 shadow-sm hover:shadow transition-all group group-hover:scale-[1.002] cursor-pointer">
+        <div onClick={onClick} className="bg-zinc-950 border text-sm border-zinc-800 hover:border-zinc-600 rounded-lg p-4 shadow-sm hover:shadow transition-all group cursor-pointer">
             <div className="flex justify-between items-start mb-3">
-               <div>
-                 <div className="flex items-center gap-2 mb-1">
+               <div className="flex-1 min-w-0 mr-3">
+                 <div className="flex items-center gap-2 mb-1 flex-wrap">
                      <span className="font-mono text-xs text-zinc-100 font-medium">{parsed.id}</span>
                      <span className="text-zinc-500 text-xs">· {formatDate(parsed.date)}</span>
+                     {existingSave && !justSaved && (
+                         <span className="flex items-center gap-1 bg-emerald-950 text-emerald-400 border border-emerald-900 px-2 py-0.5 rounded-full text-[10px] font-bold">
+                             <Bookmark className="w-2.5 h-2.5 fill-current" />
+                             Saved · {savedFolder}
+                         </span>
+                     )}
                  </div>
                  <h4 className="text-base font-bold text-zinc-50 capitalize">{parsed.title}</h4>
                </div>
-               
-               <button 
+
+               <button
                    onClick={(e) => { e.stopPropagation(); handleSave(); }}
                    className={cn(
-                       "flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-colors",
-                       isSaved ? "bg-emerald-950 text-emerald-400 border border-emerald-900" : "bg-zinc-950 border border-zinc-800 text-zinc-400 hover:bg-zinc-950 hover:text-zinc-100"
+                       "flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-colors shrink-0",
+                       justSaved || existingSave
+                           ? "bg-emerald-950 text-emerald-400 border border-emerald-900"
+                           : "bg-zinc-950 border border-zinc-800 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
                    )}
                >
-                   <Bookmark className={cn("w-3.5 h-3.5", isSaved && "fill-current")} />
-                   {isSaved ? 'Saved' : 'Save'}
+                   <Bookmark className={cn("w-3.5 h-3.5", (justSaved || existingSave) && "fill-current")} />
+                   {justSaved ? 'Saved!' : existingSave ? '✓' : 'Save'}
                </button>
             </div>
-            
+
             <p className="text-zinc-400 mb-4 line-clamp-2 leading-relaxed text-sm">
                 {parsed.description}
             </p>
-            
+
             <div className="flex flex-wrap gap-1.5">
                 {parsed.events.slice(0, 5).map((e, idx) => (
                     <span key={idx} className="bg-zinc-900 text-zinc-400 px-2 py-0.5 rounded text-[11px] font-semibold border border-zinc-800">
@@ -604,8 +1335,967 @@ const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () =>
     )
 }
 
-function HistoryScreen() {
-    const { searchHistory, clearSearchHistory } = useStore();
+// ─── FDA MDR Problem Code Lookup ──────────────────────────────────────────────
+const MDR_CODES: Record<string, string> = {
+  // Single-digit (legacy)
+  '1':'Device Malfunction','2':'User/Patient Error','3':'Inadequate Labeling',
+  '4':'Design Issue','5':'Manufacturing','6':'Component Failure','7':'Packaging','8':'Other','9':'No Information',
+  // 4-digit device problem codes
+  '1069':'Failure to Perform as Expected','1070':'Other Device Problem','1071':'Documentation Error',
+  '1072':'Human Factors Issue','1073':'Chemical Hazard','1074':'Design Issue','1075':'Labeling Issue',
+  '1076':'Component Failure','1077':'Software Issue','1078':'Electrical Issue','1079':'Mechanical Failure',
+  '1080':'Manufacturing Defect','1081':'Packaging Issue','1082':'Sterility Compromise',
+  '1083':'Biocompatibility Issue','1084':'Contamination','1085':'Leakage','1086':'Fracture',
+  '1087':'Alarm Failure','1088':'No Known Device Problem','1089':'Occlusion',
+  '1090':'Adverse Event Without Device Problem','1091':'Missing/Incorrect Information',
+  '2682':'Operated Differently Than Expected','2993':'No Apparent Adverse Event',
+  '3189':'No Device Problem Identified','3190':'Software-Related','3191':'Use Error',
+  '3192':'Alarm Issue','3193':'Disconnection','3194':'Heating/Cooling','3195':'Power Failure',
+  '3196':'Sensor Malfunction','3197':'Display/UI Issue','3198':'Communication Error',
+  '3199':'Connectivity Issue','3200':'Interoperability Issue',
+  // Patient problem codes
+  '2001':'Death','2003':'Life Threatening','2005':'Hospitalization','2007':'Disability/Impairment',
+  '2009':'Congenital Anomaly','2011':'Required Intervention','2013':'Pain/Discomfort',
+  '2015':'Illness/Injury','2017':'No Patient Consequence','2019':'Infection',
+  '2021':'Hemorrhage/Bleeding','2023':'Rash/Skin Reaction','2025':'Nausea/Vomiting',
+  '2027':'Fever','2029':'Cardiac Event','2031':'Neurological Event','2033':'Respiratory Event','2035':'Unknown',
+};
+const lookupCode = (code: string) => /^\d+$/.test(code.trim()) ? (MDR_CODES[code.trim()] ?? `Code ${code}`) : code;
+
+// ─── ProblemsView ──────────────────────────────────────────────────────────────
+function ProblemsView({
+  results, category, onProductProblemClick, onPatientProblemClick,
+}: {
+  results: any[];
+  category: Category;
+  onProductProblemClick?: (term: string) => void;
+  onPatientProblemClick?: (term: string) => void;
+}) {
+  const [selectedNode, setSelectedNode] = React.useState<string | null>(null);
+  const [minEdge, setMinEdge] = React.useState(1);
+  const [showTopN, setShowTopN] = React.useState(20);
+  const [hiddenLeftNodes, setHiddenLeftNodes] = React.useState<Set<string>>(new Set());
+  const [hiddenRightNodes, setHiddenRightNodes] = React.useState<Set<string>>(new Set());
+  const [showMapSettings, setShowMapSettings] = React.useState(false);
+  const mapSettingsRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!showMapSettings) return;
+    const handler = (e: MouseEvent) => {
+      if (mapSettingsRef.current && !mapSettingsRef.current.contains(e.target as Node))
+        setShowMapSettings(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showMapSettings]);
+
+  const { deviceProblems, patientProblems, eventTypes, coOccurrences } = React.useMemo(() => {
+    const dp: Record<string,number> = {};
+    const pp: Record<string,number> = {};
+    const et: Record<string,number> = {};
+    const co: Record<string,number> = {};
+
+    for (const r of results) {
+      const parsed = parseReport(category, r);
+      const dps: string[] = (parsed.deviceProblems ?? []).flat().filter(Boolean);
+      const pps: string[] = (parsed.patientProblems ?? []).flat().filter(Boolean);
+      const evts: string[] = (parsed.events ?? []).filter(Boolean);
+      dps.forEach(d => { dp[d] = (dp[d]||0)+1; });
+      pps.forEach(p => { pp[p] = (pp[p]||0)+1; });
+      evts.forEach(e => { et[e] = (et[e]||0)+1; });
+      // co-occurrence: device × patient
+      dps.forEach(d => pps.forEach(p => { const k=`${d}|||${p}`; co[k]=(co[k]||0)+1; }));
+      // co-occurrence: device × event type
+      dps.forEach(d => evts.forEach(e => { const k=`${d}|||evt:${e}`; co[k]=(co[k]||0)+1; }));
+    }
+    return {
+      deviceProblems: Object.entries(dp).sort((a,b)=>b[1]-a[1]),
+      patientProblems: Object.entries(pp).sort((a,b)=>b[1]-a[1]),
+      eventTypes: Object.entries(et).sort((a,b)=>b[1]-a[1]),
+      coOccurrences: co,
+    };
+  }, [results, category]);
+
+  const noProblems = deviceProblems.length === 0 && patientProblems.length === 0;
+
+  if (noProblems) return (
+    <div className="flex flex-col items-center justify-center py-24 text-zinc-600">
+      <Share2 className="w-12 h-12 mb-4 opacity-20" />
+      <p className="text-lg font-medium text-zinc-500">No problem codes found in these results</p>
+      <p className="text-sm mt-1">Problem codes appear in FDA device event reports under <code className="bg-zinc-900 px-1 rounded">device_problem_code</code> and <code className="bg-zinc-900 px-1 rounded">patient_problem_code</code></p>
+    </div>
+  );
+
+  // ── SVG bipartite map ────────────────────────────────────────────────────────
+  const VW = 960, VH_BASE = 80;
+  const LEFT_X = 230, RIGHT_X = 730;
+  const NODE_R_BASE = 5, NODE_R_MAX = 12;
+  const topDP = deviceProblems.filter(([id]) => !hiddenLeftNodes.has(id)).slice(0, showTopN);
+  const topPP = [...patientProblems, ...eventTypes.map(([k,v]) => [`evt:${k}`,v] as [string,number])]
+    .filter(([id]) => !hiddenRightNodes.has(id as string))
+    .sort((a,b)=>b[1]-a[1]).slice(0, showTopN);
+  const maxDP = topDP[0]?.[1] ?? 1;
+  const maxPP = topPP[0]?.[1] ?? 1;
+  const VH = VH_BASE + Math.max(topDP.length, topPP.length) * 42 + 40;
+  const nodeR = (count: number, max: number) => NODE_R_BASE + ((count/max)*(NODE_R_MAX-NODE_R_BASE));
+
+  const dpNodes = topDP.map(([id, count], i) => ({ id: `dp:${id}`, label: lookupCode(id), rawId: id, count, x: LEFT_X, y: VH_BASE + i*42 }));
+  const ppNodes = topPP.map(([id, count], i) => ({
+    id: `pp:${id}`, label: id.startsWith('evt:') ? id.slice(4) : lookupCode(id),
+    rawId: id as string, count, x: RIGHT_X, y: VH_BASE + i*42,
+    isEvent: (id as string).startsWith('evt:')
+  }));
+
+  const edges = Object.entries(coOccurrences)
+    .filter(([,c]) => c >= minEdge)
+    .map(([key, count]) => {
+      const [rawDp, rawPp] = key.split('|||');
+      const left = dpNodes.find(n => n.id === `dp:${rawDp}`);
+      const right = ppNodes.find(n => n.id === `pp:${rawPp}` || n.id === `pp:evt:${rawPp.replace('evt:','')}`);
+      if (!left || !right) return null;
+      return { left, right, count };
+    })
+    .filter(Boolean) as { left: typeof dpNodes[0], right: typeof ppNodes[0], count: number }[];
+
+  const maxEdge = Math.max(...edges.map(e => e.count), 1);
+
+  const isNodeActive = (id: string) => !selectedNode || selectedNode === id ||
+    edges.some(e => (e.left.id === id || e.right.id === id) && (e.left.id === selectedNode || e.right.id === selectedNode));
+  const isEdgeActive = (e: typeof edges[0]) => !selectedNode || e.left.id === selectedNode || e.right.id === selectedNode;
+
+  // All unique left/right labels for gear panel
+  const allLeftIds = deviceProblems.slice(0, showTopN + 20).map(([id]) => id);
+  const allRightIds = [...patientProblems, ...eventTypes.map(([k,v]) => [`evt:${k}`,v] as [string,number])]
+    .sort((a,b)=>b[1]-a[1]).slice(0, showTopN + 20).map(([id]) => id as string);
+
+  return (
+    <div className="space-y-5">
+      {/* Header row — summary legend only, no sub-tab toggle */}
+      <div className="flex items-center gap-4 text-xs text-zinc-500 flex-wrap">
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-amber-500 inline-block"/>{deviceProblems.length} device problems</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-rose-500 inline-block"/>{patientProblems.length} patient problems</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-indigo-500 inline-block"/>{eventTypes.length} event types</span>
+      </div>
+
+      {/* ── Connection Map ──────────────────────────────────────────────────── */}
+      <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+        {/* Map controls */}
+        <div className="flex items-center gap-4 px-5 py-3 border-b border-zinc-800 flex-wrap">
+          <span className="text-xs font-bold text-zinc-400 tracking-wide">⬡ Connection Map</span>
+          <div className="flex items-center gap-2 text-xs">
+            <label className="text-zinc-500 font-medium">Show top</label>
+            <select value={showTopN} onChange={e=>setShowTopN(+e.target.value)}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-300 text-xs outline-none">
+              {[10,15,20,30,40].map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+            <label className="text-zinc-500 font-medium">· Min co-occurrences</label>
+            <select value={minEdge} onChange={e=>setMinEdge(+e.target.value)}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-300 text-xs outline-none">
+              {[1,2,3,5,10,20].map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+          {selectedNode && (
+            <button onClick={()=>setSelectedNode(null)} className="text-xs text-zinc-500 hover:text-zinc-300 border border-zinc-700 px-3 py-1 rounded-full transition-colors">
+              ✕ Clear selection
+            </button>
+          )}
+
+          {/* Gear filter icon */}
+          <div className="relative ml-auto" ref={mapSettingsRef}>
+            <button
+              onClick={() => setShowMapSettings(s => !s)}
+              title="Node filter"
+              className={cn('p-1.5 rounded-md border border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors', showMapSettings && 'bg-zinc-800 text-zinc-300')}
+            >
+              <Settings className="w-3.5 h-3.5" />
+            </button>
+            {showMapSettings && (
+              <div className="absolute right-0 top-full mt-2 z-30 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-72 p-3 space-y-3 max-h-[70vh] overflow-y-auto">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-zinc-300">Node Filter</span>
+                  <button onClick={() => setShowMapSettings(false)} className="text-zinc-600 hover:text-zinc-400"><X className="w-3.5 h-3.5" /></button>
+                </div>
+
+                {/* Left column — Device Problems */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-[10px] font-bold text-amber-600 uppercase tracking-wider flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"/> Device Problems
+                    </p>
+                    <div className="flex gap-2">
+                      <button onClick={() => setHiddenLeftNodes(new Set())} className="text-[10px] text-zinc-600 hover:text-zinc-300">Select all</button>
+                      <span className="text-zinc-700">·</span>
+                      <button onClick={() => setHiddenLeftNodes(new Set(allLeftIds))} className="text-[10px] text-zinc-600 hover:text-zinc-300">Deselect all</button>
+                    </div>
+                  </div>
+                  <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                    {deviceProblems.slice(0, 40).map(([id, cnt]) => {
+                      const isHidden = hiddenLeftNodes.has(id);
+                      return (
+                        <label key={id} className="flex items-center gap-2 cursor-pointer group">
+                          <input type="checkbox" checked={!isHidden}
+                            onChange={() => setHiddenLeftNodes(prev => {
+                              const next = new Set(prev);
+                              if (isHidden) next.delete(id); else next.add(id);
+                              return next;
+                            })}
+                            className="accent-amber-500 w-3.5 h-3.5 shrink-0" />
+                          <span className="text-xs text-zinc-300 flex-1 truncate group-hover:text-zinc-100">{lookupCode(id)}</span>
+                          <span className="text-[10px] text-zinc-600 shrink-0">{cnt}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Right column — Patient / Event */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-[10px] font-bold text-rose-600 uppercase tracking-wider flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-rose-500 inline-block"/> Patient / Event
+                    </p>
+                    <div className="flex gap-2">
+                      <button onClick={() => setHiddenRightNodes(new Set())} className="text-[10px] text-zinc-600 hover:text-zinc-300">Select all</button>
+                      <span className="text-zinc-700">·</span>
+                      <button onClick={() => setHiddenRightNodes(new Set(allRightIds))} className="text-[10px] text-zinc-600 hover:text-zinc-300">Deselect all</button>
+                    </div>
+                  </div>
+                  <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                    {[...patientProblems, ...eventTypes.map(([k,v]) => [`evt:${k}`,v] as [string,number])]
+                      .sort((a,b)=>b[1]-a[1]).slice(0, 40).map(([id, cnt]) => {
+                        const sid = id as string;
+                        const isHidden = hiddenRightNodes.has(sid);
+                        const label = sid.startsWith('evt:') ? sid.slice(4) : lookupCode(sid);
+                        return (
+                          <label key={sid} className="flex items-center gap-2 cursor-pointer group">
+                            <input type="checkbox" checked={!isHidden}
+                              onChange={() => setHiddenRightNodes(prev => {
+                                const next = new Set(prev);
+                                if (isHidden) next.delete(sid); else next.add(sid);
+                                return next;
+                              })}
+                              className="accent-rose-500 w-3.5 h-3.5 shrink-0" />
+                            <span className={cn('text-xs flex-1 truncate group-hover:text-zinc-100', sid.startsWith('evt:') ? 'text-indigo-400' : 'text-zinc-300')}>{label}</span>
+                            <span className="text-[10px] text-zinc-600 shrink-0">{cnt}</span>
+                          </label>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => { setHiddenLeftNodes(new Set()); setHiddenRightNodes(new Set()); }}
+                  className="w-full py-1.5 text-[10px] text-zinc-500 hover:text-zinc-300 border border-zinc-800 rounded-lg transition-colors"
+                >
+                  Reset all filters
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-4 text-[10px] text-zinc-600">
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"/>Device Problem</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block"/>Patient Problem</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-indigo-500 inline-block"/>Event Type</span>
+          </div>
+        </div>
+
+        {edges.length === 0 ? (
+          <div className="py-20 text-center text-zinc-600 text-sm">
+            No connections found — try lowering the minimum co-occurrence threshold
+          </div>
+        ) : (
+          <div className="overflow-x-auto overflow-y-auto max-h-[70vh]">
+            <svg viewBox={`0 0 ${VW} ${VH}`} width={VW} height={VH} className="block">
+              <defs>
+                <filter id="glow-amber"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                <filter id="glow-rose"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              </defs>
+
+              {/* Column headers */}
+              <text x={LEFT_X} y={32} textAnchor="middle" fontSize={11} fontWeight="700" fill="#f59e0b" letterSpacing="2">DEVICE PROBLEMS</text>
+              <text x={RIGHT_X} y={32} textAnchor="middle" fontSize={11} fontWeight="700" fill="#f43f5e" letterSpacing="2">PATIENT / EVENT</text>
+              <line x1={VW/2} y1={20} x2={VW/2} y2={VH-10} stroke="#27272a" strokeWidth={1} strokeDasharray="4 4"/>
+
+              {/* Edges */}
+              {edges.map((edge, i) => {
+                const active = isEdgeActive(edge);
+                const weight = edge.count / maxEdge;
+                const cx1 = LEFT_X + 120, cy1 = edge.left.y, cx2 = RIGHT_X - 120, cy2 = edge.right.y;
+                return (
+                  <path key={i}
+                    d={`M ${edge.left.x} ${edge.left.y} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${edge.right.x} ${edge.right.y}`}
+                    fill="none"
+                    stroke={edge.right.isEvent ? '#818cf8' : '#a78bfa'}
+                    strokeWidth={active ? 0.5 + weight*2.5 : 0.5}
+                    opacity={active ? 0.15 + weight*0.7 : 0.03}
+                    style={{transition:'opacity 0.2s'}}
+                  />
+                );
+              })}
+
+              {/* Device problem nodes (left) */}
+              {dpNodes.map(node => {
+                const r = nodeR(node.count, maxDP);
+                const active = isNodeActive(node.id);
+                const sel = selectedNode === node.id;
+                return (
+                  <g key={node.id} onClick={() => setSelectedNode(sel ? null : node.id)} style={{cursor:'pointer',opacity:active?1:0.25,transition:'opacity 0.2s'}}>
+                    <circle cx={node.x} cy={node.y} r={r+4} fill="transparent"/>
+                    <circle cx={node.x} cy={node.y} r={r} fill={sel?'#f59e0b':'#78350f'} stroke={sel?'#fde68a':'#f59e0b'} strokeWidth={sel?2:1} filter={sel?'url(#glow-amber)':undefined}/>
+                    <text x={node.x - r - 6} y={node.y + 4} textAnchor="end" fontSize={10} fill={active?'#d4d4d8':'#52525b'} fontWeight={sel?'700':'400'}>
+                      {node.label.length > 28 ? node.label.slice(0,26)+'…' : node.label}
+                    </text>
+                    <text x={node.x - r - 6} y={node.y + 14} textAnchor="end" fontSize={8} fill="#52525b">{node.count}×</text>
+                  </g>
+                );
+              })}
+
+              {/* Patient / event type nodes (right) */}
+              {ppNodes.map(node => {
+                const r = nodeR(node.count, maxPP);
+                const active = isNodeActive(node.id);
+                const sel = selectedNode === node.id;
+                const color = node.isEvent ? '#6366f1' : '#f43f5e';
+                const dimColor = node.isEvent ? '#312e81' : '#4c0519';
+                const stroke = node.isEvent ? '#a5b4fc' : '#fda4af';
+                return (
+                  <g key={node.id} onClick={() => setSelectedNode(sel ? null : node.id)} style={{cursor:'pointer',opacity:active?1:0.25,transition:'opacity 0.2s'}}>
+                    <circle cx={node.x} cy={node.y} r={r+4} fill="transparent"/>
+                    <circle cx={node.x} cy={node.y} r={r} fill={sel?color:dimColor} stroke={sel?stroke:color} strokeWidth={sel?2:1} filter={sel?'url(#glow-rose)':undefined}/>
+                    <text x={node.x + r + 6} y={node.y + 4} fontSize={10} fill={active?'#d4d4d8':'#52525b'} fontWeight={sel?'700':'400'}>
+                      {node.label.length > 28 ? node.label.slice(0,26)+'…' : node.label}
+                    </text>
+                    <text x={node.x + r + 6} y={node.y + 14} fontSize={8} fill="#52525b">{node.count}×</text>
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        )}
+      </div>
+
+      {/* ── Problem List (below the map) ────────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Device problems */}
+        <div className="lg:col-span-1 bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-500"/>
+            <h3 className="text-sm font-bold text-zinc-100">Device / Product Problems</h3>
+            <span className="ml-auto text-xs text-zinc-500">{deviceProblems.length} unique</span>
+          </div>
+          <div className="divide-y divide-zinc-900 max-h-96 overflow-y-auto">
+            {deviceProblems.map(([code, count]) => (
+              <div key={code}
+                className={cn('px-4 py-2.5 flex items-center gap-3 transition-colors', onProductProblemClick ? 'cursor-pointer hover:bg-blue-950/30 group' : 'hover:bg-zinc-900/50')}
+                onClick={() => onProductProblemClick?.(lookupCode(code))}
+                title={onProductProblemClick ? 'Click to filter results by this problem' : undefined}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-zinc-200 font-medium truncate group-hover:text-blue-300 transition-colors">{lookupCode(code)}</p>
+                  <p className="text-[10px] text-zinc-600 font-mono">#{code}</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-amber-500 rounded-full" style={{width:`${(count/deviceProblems[0][1])*100}%`}}/>
+                  </div>
+                  <span className="text-xs font-bold text-zinc-400 w-8 text-right">{count}</span>
+                  {onProductProblemClick && <span className="text-[10px] text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">→</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Patient problems */}
+        <div className="lg:col-span-1 bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-rose-500"/>
+            <h3 className="text-sm font-bold text-zinc-100">Patient Problems</h3>
+            <span className="ml-auto text-xs text-zinc-500">{patientProblems.length} unique</span>
+          </div>
+          <div className="divide-y divide-zinc-900 max-h-96 overflow-y-auto">
+            {patientProblems.map(([code, count]) => (
+              <div key={code}
+                className={cn('px-4 py-2.5 flex items-center gap-3 transition-colors', onPatientProblemClick ? 'cursor-pointer hover:bg-blue-950/30 group' : 'hover:bg-zinc-900/50')}
+                onClick={() => onPatientProblemClick?.(lookupCode(code))}
+                title={onPatientProblemClick ? 'Click to filter results by this problem' : undefined}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-zinc-200 font-medium truncate group-hover:text-blue-300 transition-colors">{lookupCode(code)}</p>
+                  <p className="text-[10px] text-zinc-600 font-mono">#{code}</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-rose-500 rounded-full" style={{width:`${(count/patientProblems[0][1])*100}%`}}/>
+                  </div>
+                  <span className="text-xs font-bold text-zinc-400 w-8 text-right">{count}</span>
+                  {onPatientProblemClick && <span className="text-[10px] text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">→</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Event types */}
+        <div className="lg:col-span-1 bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-indigo-500"/>
+            <h3 className="text-sm font-bold text-zinc-100">Event Types</h3>
+            <span className="ml-auto text-xs text-zinc-500">{eventTypes.length} unique</span>
+          </div>
+          <div className="divide-y divide-zinc-900 max-h-96 overflow-y-auto">
+            {eventTypes.map(([evt, count]) => (
+              <div key={evt} className="px-4 py-2.5 flex items-center gap-3 hover:bg-zinc-900/50 transition-colors">
+                <p className="flex-1 text-sm text-zinc-200 font-medium truncate">{evt}</p>
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-indigo-500 rounded-full" style={{width:`${(count/eventTypes[0][1])*100}%`}}/>
+                  </div>
+                  <span className="text-xs font-bold text-zinc-400 w-8 text-right">{count}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── RecallsView ───────────────────────────────────────────────────────────────
+function RecallsView({
+  recallResults, recallTimeData, deviceIdentifiers, mfrGroups, onSaveMfrGroup, onRemoveMfrGroup, recallSearchMode, searchQuery, loading,
+}: {
+  recallResults: any[];
+  recallTimeData: CountResult[];
+  deviceIdentifiers: DeviceIdentifier[];
+  mfrGroups: ManufacturerGroup[];
+  onSaveMfrGroup: (g: ManufacturerGroup) => void;
+  onRemoveMfrGroup: (id: string) => void;
+  recallSearchMode: 'query' | 'identifiers' | null;
+  searchQuery: string;
+  loading: boolean;
+}) {
+  const [selectedDevice, setSelectedDevice] = React.useState<string | null>(null);
+  const [expandedId, setExpandedId] = React.useState<string | null>(null);
+
+  // ── Manufacturer grouping UI state ────────────────────────────────────────
+  const [showMfrPanel, setShowMfrPanel] = React.useState(false);
+  const [editingGroupId, setEditingGroupId] = React.useState<string | null>(null);
+  const [editDraft, setEditDraft] = React.useState<{ name: string; aliases: string[] } | null>(null);
+  const [newAlias, setNewAlias] = React.useState('');
+
+  // Collect all raw firm names from current recall results
+  const rawFirms = React.useMemo(() => {
+    const all = recallResults.map(r => (r.recalling_firm || '').trim()).filter(Boolean);
+    return [...new Set(all)].sort();
+  }, [recallResults]);
+
+  // Auto-suggested groups from current results (not yet saved)
+  const suggestedGroups = React.useMemo(() => {
+    if (rawFirms.length < 2) return [];
+    const suggestions = autoGroupManufacturers(rawFirms);
+    // Filter out suggestions already covered by saved groups
+    return suggestions.filter(s =>
+      !mfrGroups.some(g => s.aliases.every(a => g.aliases.includes(a)))
+    );
+  }, [rawFirms, mfrGroups]);
+
+  const startEditGroup = (id: string) => {
+    const g = mfrGroups.find(g => g.id === id);
+    if (!g) return;
+    setEditingGroupId(id);
+    setEditDraft({ name: g.name, aliases: [...g.aliases] });
+  };
+
+  const commitEdit = () => {
+    if (!editingGroupId || !editDraft) return;
+    const g = mfrGroups.find(g => g.id === editingGroupId);
+    if (g) onSaveMfrGroup({ ...g, name: editDraft.name, aliases: editDraft.aliases });
+    setEditingGroupId(null);
+    setEditDraft(null);
+    setNewAlias('');
+  };
+
+  const saveSuggestion = (suggestion: { name: string; aliases: string[] }) => {
+    onSaveMfrGroup({
+      id: generateId(),
+      name: suggestion.name,
+      aliases: suggestion.aliases,
+      createdAt: Date.now(),
+    });
+  };
+
+  // ── Build bipartite graph: Device (left) ↔ Recall (right) ─────────────────
+  // Each recall may match multiple device identifiers; we decide linkage by
+  // checking whether the recall's product_description or openfda.device_name
+  // contains the device brand/generic/openfda name.
+  const deviceNodes = React.useMemo(() => {
+    const nodes: { id: string; label: string; count: number }[] = [];
+    const seen = new Set<string>();
+    for (const d of deviceIdentifiers) {
+      const label = d.deviceName || d.brandName || d.genericName;
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+      // count = how many recalls mention this device
+      const count = recallResults.filter(r => {
+        const haystack = `${r.product_description || ''} ${r.openfda?.device_name || ''}`.toLowerCase();
+        return label.toLowerCase().split(' ').slice(0, 3).some(w => w.length > 3 && haystack.includes(w));
+      }).length;
+      if (count > 0) nodes.push({ id: label, label, count });
+    }
+    return nodes.sort((a, b) => b.count - a.count).slice(0, 20);
+  }, [deviceIdentifiers, recallResults]);
+
+  const recallNodes = React.useMemo(() => {
+    return recallResults.slice(0, 30).map((r, i) => ({
+      id: r.cfres_id || String(i),
+      label: (r.recalling_firm || 'Unknown Firm').slice(0, 32),
+      status: r.recall_status || 'Unknown',
+      count: 1,
+    }));
+  }, [recallResults]);
+
+  const edges = React.useMemo(() => {
+    const result: { devId: string; recId: string }[] = [];
+    for (const dev of deviceNodes) {
+      const words = dev.label.toLowerCase().split(' ').filter(w => w.length > 3).slice(0, 3);
+      for (const rec of recallNodes) {
+        const hay = recallResults.find(r => (r.cfres_id || '') === rec.id || recallResults.indexOf(r) === recallNodes.indexOf(rec));
+        const haystack = `${hay?.product_description || ''} ${hay?.openfda?.device_name || ''}`.toLowerCase();
+        if (words.some(w => haystack.includes(w))) {
+          result.push({ devId: dev.id, recId: rec.id });
+        }
+      }
+    }
+    return result;
+  }, [deviceNodes, recallNodes, recallResults]);
+
+  // SVG layout
+  const VW = 900, VH_BASE = 60, ROW_H = 36;
+  const LEFT_X = 200, RIGHT_X = 700;
+  const VH = VH_BASE + Math.max(deviceNodes.length, recallNodes.length) * ROW_H + 30;
+  const maxDevCount = deviceNodes[0]?.count ?? 1;
+
+  const isDevActive = (id: string) => !selectedDevice || selectedDevice === id || edges.some(e => e.devId === id && e.recId === (selectedDevice ?? '')) || edges.some(e => e.devId === id && edges.some(f => f.recId === e.recId && f.devId === selectedDevice));
+  const isRecActive = (id: string) => !selectedDevice || edges.some(e => e.recId === id && e.devId === selectedDevice);
+  const isEdgeActive = (e: { devId: string; recId: string }) => !selectedDevice || e.devId === selectedDevice;
+
+  // Filter recalls list by selected device
+  const filteredRecalls = React.useMemo(() => {
+    if (!selectedDevice) return recallResults;
+    const words = selectedDevice.toLowerCase().split(' ').filter(w => w.length > 3).slice(0, 3);
+    return recallResults.filter(r => {
+      const hay = `${r.product_description || ''} ${r.openfda?.device_name || ''}`.toLowerCase();
+      return words.some(w => hay.includes(w));
+    });
+  }, [selectedDevice, recallResults]);
+
+  const statusColor = (s: string) =>
+    s === 'Ongoing' ? 'bg-amber-950 text-amber-400 border-amber-900'
+    : s === 'Terminated' ? 'bg-emerald-950 text-emerald-400 border-emerald-900'
+    : 'bg-zinc-900 text-zinc-400 border-zinc-700';
+
+  if (!loading && recallResults.length === 0) return (
+    <div className="flex flex-col items-center justify-center py-24 text-zinc-600">
+      <AlertTriangle className="w-12 h-12 mb-4 opacity-20" />
+      <p className="text-lg font-medium text-zinc-500">No recalls found for "{searchQuery}"</p>
+      <p className="text-sm mt-1 text-zinc-600">Tried direct product name and identifier-based searches — no matching recall records in the FDA database.</p>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* Summary + search mode label */}
+      <div className="flex items-center gap-3 text-xs text-zinc-500 flex-wrap">
+        {/* Source label */}
+        {recallSearchMode === 'query' && (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950 border border-emerald-900 text-emerald-400 font-semibold">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"/>
+            Matched by product name: "{searchQuery}"
+          </span>
+        )}
+        {recallSearchMode === 'identifiers' && (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-950 border border-indigo-900 text-indigo-400 font-semibold">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block"/>
+            Matched by device identifiers (brand + mfr + code)
+          </span>
+        )}
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-sky-500 inline-block"/>{deviceNodes.length} device types</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block"/>{recallResults.length} recalls</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"/>{recallResults.filter(r=>r.recall_status==='Ongoing').length} ongoing</span>
+        {selectedDevice && (
+          <button onClick={() => setSelectedDevice(null)} className="ml-auto flex items-center gap-1 text-blue-400 hover:text-blue-300 border border-blue-800 px-3 py-1 rounded-full text-xs transition-colors">
+            ✕ Clear: {selectedDevice.slice(0, 30)}
+          </button>
+        )}
+      </div>
+
+      {/* ── Manufacturer Groups Panel ──────────────────────────────────────── */}
+      <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+        <button
+          onClick={() => setShowMfrPanel(v => !v)}
+          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-900 transition-colors text-left"
+        >
+          <Users className="w-4 h-4 text-zinc-500 shrink-0" />
+          <span className="text-xs font-bold text-zinc-300">Manufacturer Groups</span>
+          {(mfrGroups.length > 0 || suggestedGroups.length > 0) && (
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-indigo-950 border border-indigo-900 text-indigo-400 text-[10px] font-bold">
+              {mfrGroups.length} saved{suggestedGroups.length > 0 ? ` · ${suggestedGroups.length} suggested` : ''}
+            </span>
+          )}
+          <ChevronDown className={cn('w-3.5 h-3.5 text-zinc-600 ml-auto shrink-0 transition-transform', showMfrPanel && 'rotate-180')} />
+        </button>
+
+        {showMfrPanel && (
+          <div className="border-t border-zinc-800 divide-y divide-zinc-800/60">
+
+            {/* Auto-suggested groups */}
+            {suggestedGroups.length > 0 && (
+              <div className="p-4">
+                <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-indigo-500 inline-block animate-pulse"/>
+                  Auto-detected similar names — click to save as group
+                </p>
+                <div className="space-y-2">
+                  {suggestedGroups.map((sg, i) => (
+                    <div key={i} className="flex items-start gap-3 p-3 bg-zinc-900 border border-indigo-900/40 rounded-lg hover:border-indigo-700 transition-colors">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-zinc-200 mb-1">{sg.name}</p>
+                        <div className="flex flex-wrap gap-1">
+                          {sg.aliases.map(a => (
+                            <span key={a} className="px-2 py-0.5 text-[10px] bg-zinc-800 text-zinc-500 rounded border border-zinc-700">{a}</span>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => saveSuggestion(sg)}
+                        className="shrink-0 flex items-center gap-1 px-3 py-1.5 bg-indigo-900 hover:bg-indigo-800 text-indigo-300 rounded-lg text-[10px] font-bold transition-colors"
+                      >
+                        <Plus className="w-3 h-3" /> Save
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Saved groups */}
+            {mfrGroups.length > 0 && (
+              <div className="p-4">
+                <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-3">Saved Groups</p>
+                <div className="space-y-3">
+                  {mfrGroups.map(g => (
+                    <div key={g.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
+                      {editingGroupId === g.id && editDraft ? (
+                        <div className="space-y-2">
+                          <input
+                            value={editDraft.name}
+                            onChange={e => setEditDraft(d => d ? { ...d, name: e.target.value } : d)}
+                            className="w-full px-2.5 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs font-semibold text-zinc-100 outline-none focus:border-indigo-500"
+                            placeholder="Group name…"
+                          />
+                          <div className="flex flex-wrap gap-1.5 mt-1">
+                            {editDraft.aliases.map(a => (
+                              <span key={a} className="flex items-center gap-1 px-2 py-0.5 text-[10px] bg-zinc-800 text-zinc-400 rounded border border-zinc-700">
+                                {a}
+                                <button onClick={() => setEditDraft(d => d ? { ...d, aliases: d.aliases.filter(x => x !== a) } : d)} className="text-zinc-600 hover:text-red-400 ml-0.5">×</button>
+                              </span>
+                            ))}
+                          </div>
+                          <div className="flex gap-1.5 mt-1">
+                            <select
+                              value={newAlias}
+                              onChange={e => setNewAlias(e.target.value)}
+                              className="flex-1 px-2 py-1 bg-zinc-800 border border-zinc-700 rounded text-[10px] text-zinc-300 outline-none"
+                            >
+                              <option value="">Add a firm name…</option>
+                              {rawFirms.filter(f => !editDraft.aliases.includes(f)).map(f => (
+                                <option key={f} value={f}>{f}</option>
+                              ))}
+                            </select>
+                            <button
+                              onClick={() => { if (newAlias) { setEditDraft(d => d ? { ...d, aliases: [...d.aliases, newAlias] } : d); setNewAlias(''); } }}
+                              className="px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded text-xs"
+                            ><Plus className="w-3 h-3" /></button>
+                          </div>
+                          <div className="flex gap-2 pt-1">
+                            <button onClick={commitEdit} className="flex items-center gap-1 px-3 py-1.5 bg-emerald-900 hover:bg-emerald-800 text-emerald-300 rounded text-[10px] font-bold">
+                              <CheckCheck className="w-3 h-3" /> Save
+                            </button>
+                            <button onClick={() => { setEditingGroupId(null); setEditDraft(null); }} className="px-3 py-1.5 text-zinc-500 hover:text-zinc-300 text-[10px]">Cancel</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start gap-2">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-bold text-zinc-200 mb-1">{g.name}
+                              <span className="ml-2 text-[10px] font-normal text-zinc-600">({g.aliases.length} names)</span>
+                            </p>
+                            <div className="flex flex-wrap gap-1">
+                              {g.aliases.map(a => (
+                                <span key={a} className="px-2 py-0.5 text-[10px] bg-zinc-800 text-zinc-500 rounded border border-zinc-700">{a}</span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="flex gap-1 shrink-0">
+                            <button onClick={() => startEditGroup(g.id)} className="p-1.5 text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 rounded" title="Edit">
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => onRemoveMfrGroup(g.id)} className="p-1.5 text-zinc-600 hover:text-red-400 hover:bg-red-950 rounded" title="Delete group">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* All raw firm names found in current results */}
+            {rawFirms.length > 0 && (
+              <div className="p-4">
+                <p className="text-[10px] font-bold text-zinc-600 uppercase tracking-wider mb-2">
+                  All Firms in Results ({rawFirms.length})
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {rawFirms.map(f => {
+                    const group = mfrGroups.find(g => g.aliases.includes(f));
+                    return (
+                      <span key={f} className={cn(
+                        'px-2 py-0.5 text-[10px] rounded border',
+                        group ? 'bg-indigo-950 text-indigo-400 border-indigo-900' : 'bg-zinc-900 text-zinc-500 border-zinc-800'
+                      )} title={group ? `In group: ${group.name}` : 'Not grouped'}>
+                        {f}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {rawFirms.length === 0 && mfrGroups.length === 0 && suggestedGroups.length === 0 && (
+              <div className="p-6 text-center text-xs text-zinc-600">
+                Search for a device to see manufacturer names here.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Device → Recall connection graph ──────────────────────────────── */}
+      {deviceNodes.length > 0 && (
+        <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+          <div className="flex items-center gap-4 px-5 py-3 border-b border-zinc-800 flex-wrap">
+            <span className="text-xs font-bold text-zinc-400 tracking-wide">⬡ Device → Recall Connection Map</span>
+            <div className="flex items-center gap-4 text-[10px] text-zinc-600 ml-auto">
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-sky-500 inline-block"/>Device Model</span>
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block"/>Recall / Firm</span>
+              <span className="text-zinc-700">· Click a node to filter</span>
+            </div>
+          </div>
+          <div className="overflow-x-auto overflow-y-auto max-h-[55vh]">
+            <svg viewBox={`0 0 ${VW} ${VH}`} width={VW} height={VH} className="block">
+              <defs>
+                <filter id="glow-sky"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                <filter id="glow-rose-r"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              </defs>
+
+              <text x={LEFT_X} y={30} textAnchor="middle" fontSize={10} fontWeight="700" fill="#38bdf8" letterSpacing="2">DEVICE MODELS</text>
+              <text x={RIGHT_X} y={30} textAnchor="middle" fontSize={10} fontWeight="700" fill="#f43f5e" letterSpacing="2">RECALLS / FIRMS</text>
+              <line x1={VW/2} y1={15} x2={VW/2} y2={VH-10} stroke="#27272a" strokeWidth={1} strokeDasharray="4 4"/>
+
+              {/* Edges */}
+              {edges.map((edge, i) => {
+                const devIdx = deviceNodes.findIndex(d => d.id === edge.devId);
+                const recIdx = recallNodes.findIndex(r => r.id === edge.recId);
+                if (devIdx < 0 || recIdx < 0) return null;
+                const y1 = VH_BASE + devIdx * ROW_H;
+                const y2 = VH_BASE + recIdx * ROW_H;
+                const active = isEdgeActive(edge);
+                return (
+                  <path key={i}
+                    d={`M ${LEFT_X} ${y1} C ${LEFT_X+150} ${y1}, ${RIGHT_X-150} ${y2}, ${RIGHT_X} ${y2}`}
+                    fill="none" stroke="#818cf8"
+                    strokeWidth={active ? 1.5 : 0.5}
+                    opacity={active ? 0.5 : 0.04}
+                    style={{ transition: 'opacity 0.2s' }}
+                  />
+                );
+              })}
+
+              {/* Device nodes (left) */}
+              {deviceNodes.map((node, i) => {
+                const y = VH_BASE + i * ROW_H;
+                const r = 4 + (node.count / maxDevCount) * 7;
+                const active = isDevActive(node.id);
+                const sel = selectedDevice === node.id;
+                return (
+                  <g key={node.id} onClick={() => setSelectedDevice(sel ? null : node.id)} style={{ cursor: 'pointer', opacity: active ? 1 : 0.2, transition: 'opacity 0.2s' }}>
+                    <circle cx={LEFT_X} cy={y} r={r+4} fill="transparent"/>
+                    <circle cx={LEFT_X} cy={y} r={r} fill={sel ? '#38bdf8' : '#0c4a6e'} stroke={sel ? '#bae6fd' : '#38bdf8'} strokeWidth={sel ? 2 : 1} filter={sel ? 'url(#glow-sky)' : undefined}/>
+                    <text x={LEFT_X - r - 6} y={y + 4} textAnchor="end" fontSize={9} fill={active ? '#d4d4d8' : '#52525b'} fontWeight={sel ? '700' : '400'}>
+                      {node.label.length > 30 ? node.label.slice(0, 28) + '…' : node.label}
+                    </text>
+                    <text x={LEFT_X - r - 6} y={y + 13} textAnchor="end" fontSize={7} fill="#52525b">{node.count}×</text>
+                  </g>
+                );
+              })}
+
+              {/* Recall nodes (right) */}
+              {recallNodes.map((node, i) => {
+                const y = VH_BASE + i * ROW_H;
+                const active = isRecActive(node.id);
+                const sel = selectedDevice && edges.some(e => e.recId === node.id && e.devId === selectedDevice);
+                const col = node.status === 'Ongoing' ? '#f59e0b' : node.status === 'Terminated' ? '#10b981' : '#f43f5e';
+                const dimCol = node.status === 'Ongoing' ? '#78350f' : node.status === 'Terminated' ? '#064e3b' : '#4c0519';
+                return (
+                  <g key={node.id} style={{ opacity: active ? 1 : 0.15, transition: 'opacity 0.2s' }}>
+                    <circle cx={RIGHT_X} cy={y} r={sel ? 7 : 5} fill={sel ? col : dimCol} stroke={col} strokeWidth={sel ? 2 : 1} filter={sel ? 'url(#glow-rose-r)' : undefined}/>
+                    <text x={RIGHT_X + 12} y={y + 4} fontSize={9} fill={active ? '#d4d4d8' : '#52525b'} fontWeight={sel ? '700' : '400'}>
+                      {node.label.length > 28 ? node.label.slice(0, 26) + '…' : node.label}
+                    </text>
+                    <text x={RIGHT_X + 12} y={y + 13} fontSize={7} fill={col} fontWeight="700">{node.status}</text>
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        </div>
+      )}
+
+      {/* ── Recalls over time ────────────────────────────────────────────────── */}
+      {recallTimeData.length > 0 && (
+        <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800">
+          <h3 className="text-xs font-bold text-zinc-400 mb-4 flex items-center gap-2 uppercase tracking-wide">
+            <Clock className="w-3.5 h-3.5" /> Recalls Over Time
+          </h3>
+          <div className="h-48">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={recallTimeData.slice(-30)} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#27272a" />
+                <XAxis dataKey="time" tickFormatter={v => String(v).substring(0, 4)} tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+                <YAxis tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+                <Tooltip labelFormatter={v => `Year: ${String(v).substring(0, 4)}`} contentStyle={{ borderRadius: '8px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafafa' }} />
+                <Bar dataKey="count" fill="#f43f5e" radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {/* ── Recall list ───────────────────────────────────────────────────────── */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wide">
+            {selectedDevice ? `Recalls linked to "${selectedDevice.slice(0,40)}"` : 'All Recall Records'}
+            <span className="ml-2 text-zinc-600 font-normal normal-case">({filteredRecalls.length})</span>
+          </h3>
+        </div>
+
+        {filteredRecalls.slice(0, 60).map((r, i) => {
+          const id = r.cfres_id || r.product_res_number || String(i);
+          const expanded = expandedId === id;
+          const matchedDevices = deviceNodes.filter(d => {
+            const words = d.label.toLowerCase().split(' ').filter(w => w.length > 3).slice(0, 3);
+            const hay = `${r.product_description || ''} ${r.openfda?.device_name || ''}`.toLowerCase();
+            return words.some(w => hay.includes(w));
+          });
+          return (
+            <div key={id} className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden hover:border-zinc-700 transition-colors">
+              {/* Card header */}
+              <button onClick={() => setExpandedId(expanded ? null : id)} className="w-full text-left p-4">
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                      <span className={cn('px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border', statusColor(r.recall_status || ''))}>
+                        {r.recall_status || 'Unknown'}
+                      </span>
+                      {r.product_code && <span className="font-mono text-[10px] text-zinc-600 bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded">Code: {r.product_code}</span>}
+                      {r.event_date_initiated && <span className="text-[10px] text-zinc-600">{formatDate(r.event_date_initiated)}</span>}
+                    </div>
+                    <h4 className="font-bold text-sm text-zinc-100 leading-snug line-clamp-2">{r.product_description || 'Unknown Product'}</h4>
+                  </div>
+                  <ChevronDown className={cn('w-4 h-4 text-zinc-600 shrink-0 mt-1 transition-transform', expanded && 'rotate-180')} />
+                </div>
+
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-xs text-zinc-500"><span className="font-semibold text-zinc-400">Firm:</span> {r.recalling_firm || '—'}</span>
+                  {r.root_cause_description && <span className="text-xs text-zinc-600">· {r.root_cause_description}</span>}
+                  {/* Matched device pills */}
+                  {matchedDevices.length > 0 && (
+                    <div className="flex gap-1 flex-wrap ml-auto">
+                      {matchedDevices.slice(0, 3).map(d => (
+                        <span key={d.id} className="px-2 py-0.5 rounded-full bg-sky-950 border border-sky-900 text-sky-400 text-[10px] font-semibold">
+                          {d.label.slice(0, 25)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </button>
+
+              {/* Expanded detail */}
+              {expanded && (
+                <div className="border-t border-zinc-800 px-4 py-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div className="space-y-3">
+                    {r.reason_for_recall && (
+                      <div>
+                        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">Reason for Recall</p>
+                        <p className="text-zinc-300 text-xs leading-relaxed">{r.reason_for_recall}</p>
+                      </div>
+                    )}
+                    {r.action && (
+                      <div>
+                        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">Corrective Action</p>
+                        <p className="text-zinc-400 text-xs leading-relaxed">{r.action}</p>
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-2 text-xs">
+                    {[
+                      ['Recall #', r.product_res_number],
+                      ['Res Event #', r.res_event_number],
+                      ['Distribution', r.distribution_pattern],
+                      ['Quantity', r.product_quantity],
+                      ['Date Posted', formatDate(r.event_date_posted)],
+                      ['Date Terminated', r.event_date_terminated ? formatDate(r.event_date_terminated) : null],
+                      ['Lot / Serial', r.code_info],
+                      ['City / State', r.city ? `${r.city}, ${r.state}` : null],
+                    ].map(([label, val]) => val ? (
+                      <div key={label} className="flex gap-2">
+                        <span className="text-zinc-600 font-semibold shrink-0 w-32">{label}</span>
+                        <span className="text-zinc-300">{val}</span>
+                      </div>
+                    ) : null)}
+                    {r.openfda?.device_name && (
+                      <div className="flex gap-2">
+                        <span className="text-zinc-600 font-semibold shrink-0 w-32">Device Class</span>
+                        <span className="text-zinc-300">{r.openfda.device_name} (Class {r.openfda.device_class})</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {filteredRecalls.length === 0 && !loading && (
+          <div className="text-center py-10 text-zinc-500 text-sm bg-zinc-950 rounded-xl border border-zinc-800">
+            No recalls match the selected device. Try clicking another node.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HistoryScreen({ store }: { store: ReturnType<typeof useStore> }) {
+    const { searchHistory, clearSearchHistory } = store;
 
     return (
         <div className="p-8">
@@ -651,173 +2341,721 @@ function HistoryScreen() {
     );
 }
 
-function FiltersModal({ 
-    filters, setFilters, onClose 
-}: { 
-    filters: any, setFilters: any, onClose: () => void 
+// 3-state filter chip group with search bar and Select All
+function FilterDimGroup({
+    label, options, dim, onChange, emptyLabel = 'No data in loaded results'
+}: {
+    label: string;
+    options: string[];
+    dim: { include: string[]; exclude: string[] };
+    onChange: (d: { include: string[]; exclude: string[] }) => void;
+    emptyLabel?: string;
 }) {
+    const [search, setSearch] = React.useState('');
+
+    const filtered = options.filter(o => o.toLowerCase().includes(search.toLowerCase()));
+    const activeCount = dim.include.length + dim.exclude.length;
+
+    // Cycle: neutral → include → exclude → neutral
+    const cycle = (val: string) => {
+        if (dim.include.includes(val)) {
+            // include → exclude
+            onChange({ include: dim.include.filter(v => v !== val), exclude: [...dim.exclude, val] });
+        } else if (dim.exclude.includes(val)) {
+            // exclude → neutral
+            onChange({ include: dim.include, exclude: dim.exclude.filter(v => v !== val) });
+        } else {
+            // neutral → include
+            onChange({ include: [...dim.include, val], exclude: dim.exclude });
+        }
+    };
+
+    const selectAll = () => {
+        onChange({ include: [...filtered], exclude: [] });
+    };
+
+    const clearAll = () => onChange({ include: [], exclude: [] });
+
+    const stateOf = (val: string): 'include' | 'exclude' | 'neutral' => {
+        if (dim.include.includes(val)) return 'include';
+        if (dim.exclude.includes(val)) return 'exclude';
+        return 'neutral';
+    };
+
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/50 backdrop-blur-sm" onClick={onClose}>
-            <div className="bg-zinc-950 rounded-xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
-                <div className="flex items-center justify-between p-5 border-b border-zinc-800">
-                    <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
-                         <Filter className="w-5 h-5 text-zinc-100" /> Filter Results
-                    </h2>
-                    <button onClick={onClose} className="p-2 text-zinc-500 hover:text-zinc-400 bg-zinc-950 rounded-lg">
-                        <X className="w-5 h-5" />
+        <div className="space-y-2">
+            {/* Header row */}
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">{label}</span>
+                    {activeCount > 0 && (
+                        <span className="text-[10px] font-bold bg-zinc-800 text-zinc-300 px-1.5 py-0.5 rounded-full">
+                            {dim.include.length > 0 && <span className="text-blue-400">{dim.include.length}✓</span>}
+                            {dim.include.length > 0 && dim.exclude.length > 0 && ' '}
+                            {dim.exclude.length > 0 && <span className="text-red-400">{dim.exclude.length}✕</span>}
+                        </span>
+                    )}
+                </div>
+                <div className="flex items-center gap-2">
+                    {filtered.length > 0 && (
+                        <button
+                            onClick={selectAll}
+                            className="text-[10px] font-semibold text-zinc-500 hover:text-blue-400 transition-colors"
+                        >
+                            Include All
+                        </button>
+                    )}
+                    {activeCount > 0 && (
+                        <button onClick={clearAll} className="text-[10px] font-semibold text-zinc-500 hover:text-zinc-300 transition-colors">
+                            Clear
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            {/* Search bar */}
+            {options.length > 5 && (
+                <div className="relative">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none" />
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        placeholder={`Search ${label.toLowerCase()}…`}
+                        className="w-full pl-8 pr-3 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+                    />
+                    {search && (
+                        <button onClick={() => setSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-400">
+                            <X className="w-3 h-3" />
+                        </button>
+                    )}
+                </div>
+            )}
+
+            {/* Chips */}
+            {options.length === 0 ? (
+                <p className="text-xs text-zinc-600 italic py-1">{emptyLabel}</p>
+            ) : filtered.length === 0 ? (
+                <p className="text-xs text-zinc-600 italic py-1">No matches for "{search}"</p>
+            ) : (
+                <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
+                    {filtered.map(opt => {
+                        const state = stateOf(opt);
+                        return (
+                            <button
+                                key={opt}
+                                onClick={() => cycle(opt)}
+                                title={state === 'neutral' ? 'Click to include' : state === 'include' ? 'Click to exclude' : 'Click to remove'}
+                                className={cn(
+                                    'px-2.5 py-1 rounded-full text-xs font-semibold border transition-all flex items-center gap-1',
+                                    state === 'include'
+                                        ? 'bg-blue-600 border-blue-500 text-white'
+                                        : state === 'exclude'
+                                        ? 'bg-red-950 border-red-700 text-red-300'
+                                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'
+                                )}
+                            >
+                                {state === 'include' && <span className="text-[10px] font-bold">✓</span>}
+                                {state === 'exclude' && <span className="text-[10px] font-bold">✕</span>}
+                                {opt}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+
+            {/* Legend hint — only show on first render when no filter active */}
+            {activeCount === 0 && options.length > 0 && (
+                <p className="text-[10px] text-zinc-700">Click once to <span className="text-blue-400">include</span> · twice to <span className="text-red-400">exclude</span> · again to clear</p>
+            )}
+        </div>
+    );
+}
+
+// ── KeywordSearchBar ──────────────────────────────────────────────────────────
+function KeywordSearchBar({
+  keywordFilter, setKeywordFilter, totalResults, matchCount,
+}: {
+  keywordFilter: { include: string[]; exclude: string[] };
+  setKeywordFilter: (kf: { include: string[]; exclude: string[] }) => void;
+  totalResults: number;
+  matchCount: number;
+}) {
+  const [input, setInput] = React.useState('');
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const { include, exclude } = keywordFilter;
+  const totalChips = include.length + exclude.length;
+
+  const commit = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const isExclude = trimmed.startsWith('-');
+    const kw = isExclude ? trimmed.slice(1).trim() : trimmed;
+    if (!kw) return;
+    if (isExclude) {
+      if (!exclude.includes(kw)) setKeywordFilter({ include, exclude: [...exclude, kw] });
+    } else {
+      if (!include.includes(kw)) setKeywordFilter({ include: [...include, kw], exclude });
+    }
+    setInput('');
+  };
+
+  const removeChip = (type: 'include' | 'exclude', kw: string) => {
+    if (type === 'include') setKeywordFilter({ include: include.filter(x => x !== kw), exclude });
+    else setKeywordFilter({ include, exclude: exclude.filter(x => x !== kw) });
+  };
+
+  // Toggle a chip between include ↔ exclude
+  const toggleChip = (type: 'include' | 'exclude', kw: string) => {
+    if (type === 'include') {
+      setKeywordFilter({ include: include.filter(x => x !== kw), exclude: [...exclude, kw] });
+    } else {
+      setKeywordFilter({ include: [...include, kw], exclude: exclude.filter(x => x !== kw) });
+    }
+  };
+
+  const isActive = totalChips > 0;
+  const hasFilter = totalResults !== matchCount;
+
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-1.5 px-3 py-2 rounded-xl border transition-colors cursor-text min-h-[42px]',
+        isActive
+          ? 'bg-zinc-900 border-zinc-700 ring-1 ring-zinc-700'
+          : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'
+      )}
+      onClick={() => inputRef.current?.focus()}
+    >
+      {/* Search icon */}
+      <Search className="w-3.5 h-3.5 text-zinc-600 shrink-0 self-center" />
+
+      {/* Include chips */}
+      {include.map(kw => (
+        <span key={`inc-${kw}`} className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-blue-950 border border-blue-800 text-blue-300 text-xs font-semibold">
+          <button
+            title="Click to make this an exclusion"
+            onClick={e => { e.stopPropagation(); toggleChip('include', kw); }}
+            className="opacity-80 hover:opacity-100 text-[10px] font-bold mr-0.5"
+          >✓</button>
+          {kw}
+          <button onClick={e => { e.stopPropagation(); removeChip('include', kw); }} className="opacity-60 hover:opacity-100 ml-0.5 text-sm leading-none">×</button>
+        </span>
+      ))}
+
+      {/* Exclude chips */}
+      {exclude.map(kw => (
+        <span key={`exc-${kw}`} className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-red-950 border border-red-800 text-red-300 text-xs font-semibold">
+          <button
+            title="Click to make this an inclusion"
+            onClick={e => { e.stopPropagation(); toggleChip('exclude', kw); }}
+            className="opacity-80 hover:opacity-100 text-[10px] font-bold mr-0.5"
+          >✕</button>
+          {kw}
+          <button onClick={e => { e.stopPropagation(); removeChip('exclude', kw); }} className="opacity-60 hover:opacity-100 ml-0.5 text-sm leading-none">×</button>
+        </span>
+      ))}
+
+      {/* Text input */}
+      <input
+        ref={inputRef}
+        type="text"
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        onKeyDown={e => {
+          if ((e.key === 'Enter' || e.key === ',') && input.trim()) {
+            e.preventDefault();
+            commit(input);
+          } else if (e.key === 'Backspace' && !input && totalChips > 0) {
+            // Remove last chip
+            if (exclude.length > 0) setKeywordFilter({ include, exclude: exclude.slice(0, -1) });
+            else setKeywordFilter({ include: include.slice(0, -1), exclude });
+          }
+        }}
+        placeholder={
+          totalChips === 0
+            ? 'Keyword search within results… (use -word to exclude, comma to add)'
+            : 'Add keyword…'
+        }
+        className="flex-1 min-w-40 bg-transparent text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none self-center py-0.5"
+      />
+
+      {/* Right side: match count + clear */}
+      <div className="ml-auto flex items-center gap-2 shrink-0">
+        {hasFilter && (
+          <span className="text-xs text-zinc-500 whitespace-nowrap">
+            <span className="font-bold text-zinc-300">{matchCount}</span>
+            <span className="text-zinc-600"> / {totalResults}</span>
+          </span>
+        )}
+        {isActive && (
+          <button
+            onClick={e => { e.stopPropagation(); setKeywordFilter({ include: [], exclude: [] }); setInput(''); }}
+            className="text-zinc-600 hover:text-zinc-400 transition-colors"
+            title="Clear keyword filter"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── QuickFilterBar ─────────────────────────────────────────────────────────────
+function QuickFilterBar({
+  filters, setFilters, results, category, onOpenMore,
+}: {
+  filters: any;
+  setFilters: (f: any) => void;
+  results: any[];
+  category: Category;
+  onOpenMore: () => void;
+}) {
+  const [open, setOpen] = React.useState<string | null>(null);
+  const barRef = React.useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  React.useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (barRef.current && !barRef.current.contains(e.target as Node)) setOpen(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const unique = (arr: (string | undefined | null)[]) =>
+    Array.from(new Set(arr.filter(Boolean) as string[])).sort();
+
+  const manufacturerOpts = unique(results.map(r => r.device?.[0]?.manufacturer_d_name));
+  const deviceNameOpts   = unique(results.map(r => r.device?.[0]?.generic_name));
+  const patientProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.patientProblems ?? []) as string[]; }));
+  const productProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.deviceProblems ?? []) as string[]; }));
+
+  // Count active per section
+  const countDim = (d: { include: string[]; exclude: string[] }) => d.include.length + d.exclude.length;
+  const dateActive = (filters.startDate ? 1 : 0) + (filters.endDate ? 1 : 0);
+  const totalActive = countDim(filters.manufacturers) + countDim(filters.productProblems) + countDim(filters.patientProblems) + countDim(filters.deviceNames) + dateActive;
+
+  type Dim = { include: string[]; exclude: string[] };
+
+  // Chip cycling: neutral → include → exclude → neutral
+  const cycleDim = (dim: Dim, opt: string): Dim => {
+    if (dim.include.includes(opt)) return { include: dim.include.filter(x => x !== opt), exclude: [...dim.exclude, opt] };
+    if (dim.exclude.includes(opt)) return { include: dim.include, exclude: dim.exclude.filter(x => x !== opt) };
+    return { include: [...dim.include, opt], exclude: dim.exclude };
+  };
+  const stateOf = (dim: Dim, opt: string) =>
+    dim.include.includes(opt) ? 'include' : dim.exclude.includes(opt) ? 'exclude' : 'neutral';
+
+  // Popover for a dimension
+  const DimPopover = ({ dimKey, opts, dim, accent = 'blue' }: {
+    dimKey: string; opts: string[]; dim: Dim; accent?: string;
+  }) => {
+    const [search, setSearch] = React.useState('');
+    const filtered = opts.filter(o => o.toLowerCase().includes(search.toLowerCase()));
+    const accentInclude = accent === 'blue' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-violet-600 border-violet-500 text-white';
+    return (
+      <div className="p-3 space-y-2">
+        {opts.length > 6 && (
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none" />
+            <input
+              autoFocus
+              type="text" value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Search…"
+              className="w-full pl-8 pr-3 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+            />
+            {search && <button onClick={() => setSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-400"><X className="w-3 h-3" /></button>}
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          <div className="flex gap-2">
+            <button onClick={() => setFilters({ ...filters, [dimKey]: { include: opts, exclude: [] } })} className="text-[10px] text-zinc-600 hover:text-zinc-300">Select all</button>
+            <span className="text-zinc-700">·</span>
+            <button onClick={() => setFilters({ ...filters, [dimKey]: { include: [], exclude: [] } })} className="text-[10px] text-zinc-600 hover:text-zinc-300">Clear</button>
+          </div>
+          <p className="text-[10px] text-zinc-700">✓ include · ✕ exclude</p>
+        </div>
+        <div className="flex flex-wrap gap-1.5 max-h-44 overflow-y-auto pr-1">
+          {filtered.length === 0 && <p className="text-xs text-zinc-600 italic">No matches</p>}
+          {filtered.map(opt => {
+            const state = stateOf(dim, opt);
+            return (
+              <button key={opt}
+                onClick={() => setFilters({ ...filters, [dimKey]: cycleDim(dim, opt) })}
+                className={cn(
+                  'px-2.5 py-1 rounded-full text-xs font-semibold border transition-all flex items-center gap-1',
+                  state === 'include' ? accentInclude
+                  : state === 'exclude' ? 'bg-red-950 border-red-700 text-red-300'
+                  : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'
+                )}>
+                {state === 'include' && <span className="text-[10px] font-bold">✓</span>}
+                {state === 'exclude' && <span className="text-[10px] font-bold">✕</span>}
+                {opt.length > 38 ? opt.slice(0,36)+'…' : opt}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  interface QuickFilterConfig { id: string; label: string; count: number; }
+  const quickFilters: QuickFilterConfig[] = [
+    { id: 'date',            label: 'Date',             count: dateActive },
+    { id: 'manufacturers',   label: 'Manufacturer',     count: countDim(filters.manufacturers) },
+    { id: 'productProblems', label: 'Product Problems', count: countDim(filters.productProblems) },
+    { id: 'patientProblems', label: 'Patient Problems', count: countDim(filters.patientProblems) },
+    { id: 'deviceNames',     label: 'Device Type',      count: countDim(filters.deviceNames) },
+  ];
+
+  // All active chips for removal row
+  const activeChips: { label: string; dimKey: string; value: string; type: 'include' | 'exclude' }[] = [
+    ...(['manufacturers', 'productProblems', 'patientProblems', 'deviceNames'] as const).flatMap(k =>
+      [
+        ...filters[k].include.map((v: string) => ({ label: v, dimKey: k, value: v, type: 'include' as const })),
+        ...filters[k].exclude.map((v: string) => ({ label: v, dimKey: k, value: v, type: 'exclude' as const })),
+      ]
+    ),
+  ];
+
+  return (
+    <div ref={barRef} className="space-y-2">
+      {/* Bar */}
+      <div className="flex items-center gap-1.5 flex-wrap bg-zinc-900/60 border border-zinc-800 rounded-xl px-3 py-2">
+        <Filter className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
+        {quickFilters.map(qf => {
+          const isOpen = open === qf.id;
+          const isActive = qf.count > 0;
+          return (
+            <div key={qf.id} className="relative">
+              <button
+                onClick={() => setOpen(isOpen ? null : qf.id)}
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all',
+                  isOpen ? 'bg-zinc-800 border-zinc-600 text-zinc-100' :
+                  isActive ? 'bg-blue-950 border-blue-800 text-blue-300' :
+                  'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700'
+                )}
+              >
+                {qf.id === 'date' && <Calendar className="w-3 h-3" />}
+                {qf.label}
+                {isActive && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-blue-600 text-white text-[9px] font-bold leading-none">{qf.count}</span>
+                )}
+                <ChevronDown className={cn('w-3 h-3 text-zinc-600 transition-transform', isOpen && 'rotate-180')} />
+              </button>
+
+              {/* Popover */}
+              {isOpen && (
+                <div className="absolute left-0 top-full mt-1.5 z-40 bg-zinc-950 border border-zinc-700 rounded-xl shadow-2xl min-w-[280px] max-w-[360px]">
+                  {qf.id === 'date' ? (
+                    <div className="p-3 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-zinc-300">Date Range</span>
+                        {(filters.startDate || filters.endDate) && (
+                          <button onClick={() => setFilters({ ...filters, startDate: '', endDate: '' })} className="text-[10px] text-zinc-600 hover:text-zinc-300">Clear</button>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">From</label>
+                          <input type="date" value={filters.startDate}
+                            onChange={e => setFilters({ ...filters, startDate: e.target.value })}
+                            className="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 text-zinc-300"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">To</label>
+                          <input type="date" value={filters.endDate}
+                            onChange={e => setFilters({ ...filters, endDate: e.target.value })}
+                            className="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 text-zinc-300"
+                          />
+                        </div>
+                      </div>
+                      {/* Quick presets */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {[
+                          { label: 'Last year', from: `${new Date().getFullYear()-1}-01-01`, to: `${new Date().getFullYear()-1}-12-31` },
+                          { label: 'Last 2 yrs', from: `${new Date().getFullYear()-2}-01-01`, to: '' },
+                          { label: 'Last 5 yrs', from: `${new Date().getFullYear()-5}-01-01`, to: '' },
+                          { label: '2020–2024', from: '2020-01-01', to: '2024-12-31' },
+                        ].map(p => (
+                          <button key={p.label}
+                            onClick={() => setFilters({ ...filters, startDate: p.from, endDate: p.to })}
+                            className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors"
+                          >{p.label}</button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : qf.id === 'manufacturers' ? (
+                    <DimPopover dimKey="manufacturers" opts={manufacturerOpts} dim={filters.manufacturers} />
+                  ) : qf.id === 'productProblems' ? (
+                    <DimPopover dimKey="productProblems" opts={productProblemOpts} dim={filters.productProblems} accent="violet" />
+                  ) : qf.id === 'patientProblems' ? (
+                    <DimPopover dimKey="patientProblems" opts={patientProblemOpts} dim={filters.patientProblems} accent="violet" />
+                  ) : (
+                    <DimPopover dimKey="deviceNames" opts={deviceNameOpts} dim={filters.deviceNames} />
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* More filters */}
+        <button
+          onClick={() => { setOpen(null); onOpenMore(); }}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-800 text-xs font-semibold text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 transition-colors ml-auto"
+        >
+          ··· More filters
+          {(() => {
+            const extra = [filters.eventTypes, filters.sexes, filters.eventLocations, filters.reportSources, filters.reporterStates].reduce((a: number, d: any) => a + d.include.length + d.exclude.length, 0) + (filters.limit !== 500 ? 1 : 0) + (filters.searchField !== 'auto' ? 1 : 0);
+            return extra > 0 ? <span className="px-1.5 py-0.5 rounded-full bg-zinc-700 text-zinc-300 text-[9px] font-bold">{extra}</span> : null;
+          })()}
+        </button>
+
+        {/* Clear all */}
+        {totalActive > 0 && (
+          <button
+            onClick={() => setFilters((f: any) => ({ ...f, manufacturers: { include:[], exclude:[] }, productProblems: { include:[], exclude:[] }, patientProblems: { include:[], exclude:[] }, deviceNames: { include:[], exclude:[] }, startDate: '', endDate: '' }))}
+            className="text-[10px] text-zinc-700 hover:text-red-400 transition-colors ml-1"
+            title="Clear quick filters"
+          >
+            Clear ({totalActive})
+          </button>
+        )}
+      </div>
+
+      {/* Active chip row */}
+      {activeChips.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {activeChips.map((chip, i) => (
+            <span key={i} className={cn(
+              'flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold border',
+              chip.type === 'include' ? 'bg-blue-950 border-blue-800 text-blue-300' : 'bg-red-950 border-red-800 text-red-300'
+            )}>
+              {chip.type === 'include' ? '✓' : '✕'} {chip.label.length > 35 ? chip.label.slice(0,33)+'…' : chip.label}
+              <button
+                onClick={() => setFilters((f: any) => ({
+                  ...f,
+                  [chip.dimKey]: {
+                    include: f[chip.dimKey].include.filter((x: string) => x !== chip.value),
+                    exclude: f[chip.dimKey].exclude.filter((x: string) => x !== chip.value),
+                  }
+                }))}
+                className="opacity-60 hover:opacity-100 ml-0.5"
+              >×</button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FiltersModal({
+    filters, setFilters, onClose, results, category
+}: {
+    filters: any;
+    setFilters: any;
+    onClose: () => void;
+    results: any[];
+    category: Category;
+}) {
+    const unique = (arr: (string | undefined | null)[]) =>
+        Array.from(new Set(arr.filter(Boolean) as string[])).sort();
+
+    const eventTypeOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return p.events; }));
+    const manufacturerOpts = unique(results.map(r => r.device?.[0]?.manufacturer_d_name));
+    const deviceNameOpts = unique(results.map(r => r.device?.[0]?.generic_name));
+    const eventLocationOpts = unique(results.map(r => r.event_location));
+    const reportSourceOpts = unique(results.map(r => r.report_source_code));
+    const reporterStateOpts = unique(results.map(r => r.reporter_state_code));
+    const sexOpts = unique(results.map(r => { const p = parseReport(category, r); return p.patient?.sex; }));
+
+    const EMPTY_FILTERS = {
+        eventTypes: { include: [], exclude: [] },
+        manufacturers: { include: [], exclude: [] },
+        deviceNames: { include: [], exclude: [] },
+        eventLocations: { include: [], exclude: [] },
+        reportSources: { include: [], exclude: [] },
+        reporterStates: { include: [], exclude: [] },
+        sexes: { include: [], exclude: [] },
+        patientProblems: { include: [], exclude: [] },
+        productProblems: { include: [], exclude: [] },
+        searchField: 'auto',
+        startDate: '', endDate: '', limit: 500,
+    };
+
+    const fieldGroups = SEARCH_FIELD_GROUPS[category] ?? {};
+    const fieldGroupEntries = Object.entries(fieldGroups);
+
+    const patientProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.patientProblems ?? []) as string[]; }));
+    const productProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.deviceProblems ?? []) as string[]; }));
+
+    const dims = [filters.eventTypes, filters.manufacturers, filters.deviceNames, filters.eventLocations, filters.reportSources, filters.reporterStates, filters.sexes, filters.patientProblems, filters.productProblems];
+    const activeCount = dims.reduce((a: number, d: any) => a + d.include.length + d.exclude.length, 0)
+        + (filters.startDate ? 1 : 0) + (filters.endDate ? 1 : 0) + (filters.limit !== 500 ? 1 : 0)
+        + (filters.searchField !== 'auto' ? 1 : 0);
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-zinc-950/70 backdrop-blur-sm" onClick={onClose}>
+            <div
+                className="bg-zinc-950 rounded-t-2xl sm:rounded-xl shadow-2xl w-full sm:max-w-xl max-h-[90vh] overflow-hidden flex flex-col border border-zinc-800"
+                onClick={e => e.stopPropagation()}
+            >
+                {/* Header */}
+                <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800 shrink-0">
+                    <div className="flex items-center gap-3">
+                        <Filter className="w-4 h-4 text-zinc-400" />
+                        <h2 className="text-sm font-bold text-zinc-100 uppercase tracking-wider">Filter Results</h2>
+                        {activeCount > 0 && (
+                            <span className="bg-blue-600 text-white text-xs font-bold px-2 py-0.5 rounded-full">{activeCount} active</span>
+                        )}
+                    </div>
+                    <button onClick={onClose} className="p-1.5 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 rounded-lg transition-colors">
+                        <X className="w-4 h-4" />
                     </button>
                 </div>
-                <div className="p-5 space-y-4">
-                    <div>
-                        <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">Max API Results Limit</label>
-                        <select 
-                            value={filters.limit} 
-                            onChange={e => setFilters({...filters, limit: e.target.value === 'All' ? 'All' : parseInt(e.target.value)})}
-                            className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm focus:outline-none focus:border-blue-500 text-zinc-300 font-medium"
-                        >
-                            <option value={100}>100</option>
-                            <option value={500}>500</option>
-                            <option value={1000}>1000</option>
-                            <option value={2000}>2000</option>
-                            <option value="All">All</option>
-                        </select>
+
+                {/* Scrollable body */}
+                <div className="overflow-y-auto flex-1 p-5 space-y-5">
+
+                    {/* Search Field Selector */}
+                    {fieldGroupEntries.length > 0 && (
+                        <div>
+                            <div className="flex items-center justify-between mb-2">
+                                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Search Field</label>
+                                {filters.searchField !== 'auto' && (
+                                    <button onClick={() => setFilters({ ...filters, searchField: 'auto' })} className="text-[10px] text-zinc-500 hover:text-zinc-300">
+                                        Reset to Auto
+                                    </button>
+                                )}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                                <button
+                                    onClick={() => setFilters({ ...filters, searchField: 'auto' })}
+                                    className={cn('px-2.5 py-1 rounded-full text-xs font-semibold border transition-all',
+                                        filters.searchField === 'auto'
+                                            ? 'bg-violet-600 border-violet-500 text-white'
+                                            : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'
+                                    )}
+                                >
+                                    ✦ Auto-detect
+                                </button>
+                                {fieldGroupEntries.map(([key, { label }]) => (
+                                    <button
+                                        key={key}
+                                        onClick={() => setFilters({ ...filters, searchField: filters.searchField === key ? 'auto' : key })}
+                                        className={cn('px-2.5 py-1 rounded-full text-xs font-semibold border transition-all',
+                                            filters.searchField === key
+                                                ? 'bg-blue-600 border-blue-500 text-white'
+                                                : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'
+                                        )}
+                                    >
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+                            <p className="text-[10px] text-zinc-700 mt-1.5">
+                                {filters.searchField === 'auto'
+                                    ? 'Query shape is analysed automatically — long numbers → report #, short uppercase → product code, etc.'
+                                    : `All queries will search the “${fieldGroups[filters.searchField]?.label}” field only.`}
+                            </p>
+                        </div>
+                    )}
+
+                    <div className="border-t border-zinc-800" />
+
+                    {/* Date + Limit row */}
+                    <div className="grid grid-cols-3 gap-3">
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1.5">Max Results</label>
+                            <select
+                                value={filters.limit}
+                                onChange={e => setFilters({ ...filters, limit: e.target.value === 'All' ? 'All' : parseInt(e.target.value) })}
+                                className="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 text-zinc-300 font-medium"
+                            >
+                                <option value={100}>100</option>
+                                <option value={500}>500</option>
+                                <option value={1000}>1,000</option>
+                                <option value={2000}>2,000</option>
+                                <option value="All">All</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1.5">Date From</label>
+                            <input type="date" value={filters.startDate}
+                                onChange={e => setFilters({ ...filters, startDate: e.target.value })}
+                                className="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 text-zinc-300"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1.5">Date To</label>
+                            <input type="date" value={filters.endDate}
+                                onChange={e => setFilters({ ...filters, endDate: e.target.value })}
+                                className="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 text-zinc-300"
+                            />
+                        </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                          <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">Patient Sex</label>
-                          <select 
-                              value={filters.sex} 
-                              onChange={e => setFilters({...filters, sex: e.target.value})}
-                              className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm focus:outline-none focus:border-blue-500 text-zinc-300 font-medium"
-                          >
-                              <option value="">Any</option>
-                              <option value="Male">Male</option>
-                              <option value="Female">Female</option>
-                          </select>
-                      </div>
-                      <div>
-                          <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">Event Type Contains</label>
-                          <input 
-                              type="text" 
-                              value={filters.eventType} 
-                              onChange={e => setFilters({...filters, eventType: e.target.value})}
-                              className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-                              placeholder="e.g. malfunction"
-                          />
-                      </div>
-                    </div>
-                    <div>
-                        <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">Start Date (YYYYMMDD)</label>
-                        <input 
-                            type="text" 
-                            value={filters.startDate} 
-                            onChange={e => setFilters({...filters, startDate: e.target.value})}
-                            className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-                            placeholder="e.g. 2023-01-01"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">End Date (YYYYMMDD)</label>
-                        <input 
-                            type="text" 
-                            value={filters.endDate} 
-                            onChange={e => setFilters({...filters, endDate: e.target.value})}
-                            className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-                            placeholder="e.g. 2023-12-31"
-                        />
-                    </div>
+
+                    <div className="border-t border-zinc-800" />
+
+                    <FilterDimGroup label="Event Type" options={eventTypeOpts} dim={filters.eventTypes}
+                        onChange={d => setFilters({ ...filters, eventTypes: d })} />
+                    <div className="border-t border-zinc-800/50" />
+                    <FilterDimGroup label="Patient Sex" options={sexOpts} dim={filters.sexes}
+                        onChange={d => setFilters({ ...filters, sexes: d })} />
+                    <div className="border-t border-zinc-800/50" />
+                    {patientProblemOpts.length > 0 && (
+                        <>
+                        <FilterDimGroup label="Patient Problems" options={patientProblemOpts} dim={filters.patientProblems}
+                            onChange={d => setFilters({ ...filters, patientProblems: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                        </>
+                    )}
+                    {productProblemOpts.length > 0 && (
+                        <>
+                        <FilterDimGroup label="Product Problems" options={productProblemOpts} dim={filters.productProblems}
+                            onChange={d => setFilters({ ...filters, productProblems: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                        </>
+                    )}
+                    <FilterDimGroup label="Manufacturer" options={manufacturerOpts} dim={filters.manufacturers}
+                        onChange={d => setFilters({ ...filters, manufacturers: d })} />
+                    <div className="border-t border-zinc-800/50" />
+                    <FilterDimGroup label="Device Type" options={deviceNameOpts} dim={filters.deviceNames}
+                        onChange={d => setFilters({ ...filters, deviceNames: d })} />
+                    <div className="border-t border-zinc-800/50" />
+                    <FilterDimGroup label="Event Location" options={eventLocationOpts} dim={filters.eventLocations}
+                        onChange={d => setFilters({ ...filters, eventLocations: d })} />
+                    <div className="border-t border-zinc-800/50" />
+                    <FilterDimGroup label="Report Source" options={reportSourceOpts} dim={filters.reportSources}
+                        onChange={d => setFilters({ ...filters, reportSources: d })} />
+                    <div className="border-t border-zinc-800/50" />
+                    <FilterDimGroup label="Reporter State" options={reporterStateOpts} dim={filters.reporterStates}
+                        onChange={d => setFilters({ ...filters, reporterStates: d })} />
                 </div>
-                <div className="p-5 border-t border-zinc-800 flex justify-end gap-3 bg-zinc-950">
-                    <button onClick={() => setFilters({eventType: '', startDate: '', endDate: '', limit: 500, sex: ''})} className="px-4 py-2 text-sm font-semibold text-zinc-400 hover:bg-zinc-800 rounded-lg transition-colors">
+
+                {/* Footer */}
+                <div className="p-4 border-t border-zinc-800 flex justify-between items-center shrink-0 bg-zinc-950">
+                    <button
+                        onClick={() => setFilters(EMPTY_FILTERS)}
+                        className="px-4 py-2 text-sm font-semibold text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 rounded-lg transition-colors"
+                    >
                         Clear All
                     </button>
-                    <button onClick={onClose} className="px-5 py-2 text-sm font-semibold text-zinc-50 bg-zinc-100 text-zinc-950 hover:bg-zinc-200 hover:bg-zinc-200 rounded-lg shadow-sm transition-colors">
+                    <button
+                        onClick={onClose}
+                        className="px-5 py-2 text-sm font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow transition-colors"
+                    >
                         Apply Filters
                     </button>
                 </div>
             </div>
         </div>
-    )
+    );
 }
-
-function ReportModal({ rawReport, category, onClose }: { rawReport: any, category: Category, onClose: () => void }) {
-    const parsed = parseReport(category, rawReport);
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/50 backdrop-blur-sm" onClick={onClose}>
-            <div className="bg-zinc-950 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
-                <div className="flex items-center justify-between p-6 border-b border-zinc-800 bg-zinc-950">
-                    <div>
-                         <div className="flex items-center gap-2 mb-1">
-                             <span className="font-mono text-xs text-zinc-100 font-bold bg-zinc-800 px-2 py-0.5 rounded">{parsed.id}</span>
-                             <span className="text-zinc-500 text-xs">· {formatDate(parsed.date)}</span>
-                         </div>
-                         <h2 className="text-xl font-bold text-zinc-100">{parsed.title}</h2>
-                    </div>
-                    <button onClick={onClose} className="p-2 text-zinc-500 hover:text-zinc-400 hover:bg-zinc-800 rounded-lg transition">
-                        <X className="w-5 h-5" />
-                    </button>
-                </div>
-                <div className="p-6 overflow-y-auto space-y-6">
-                    <div>
-                        <h3 className="text-sm font-bold text-zinc-100 uppercase tracking-widest mb-3">Narrative & Description</h3>
-                        <div className="bg-zinc-950 p-4 rounded-lg text-sm text-zinc-300 leading-relaxed border border-zinc-800 whitespace-pre-wrap">
-                            {parsed.narrative || parsed.description}
-                        </div>
-                    </div>
-                    {(parsed.patientProblems?.length > 0) && (
-                        <div>
-                            <h3 className="text-sm font-bold text-zinc-100 uppercase tracking-widest mb-3">Patient Problems</h3>
-                            <div className="flex flex-wrap gap-2">
-                                {parsed.patientProblems.map((e, idx) => (
-                                    <span key={idx} className="bg-rose-950 text-rose-400 px-3 py-1.5 rounded-full text-xs font-semibold border border-rose-900">
-                                        {e}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {(parsed.deviceProblems?.length > 0) && (
-                        <div>
-                            <h3 className="text-sm font-bold text-zinc-100 uppercase tracking-widest mb-3">Device Problems</h3>
-                            <div className="flex flex-wrap gap-2">
-                                {parsed.deviceProblems.map((e, idx) => (
-                                    <span key={idx} className="bg-amber-950 text-amber-400 px-3 py-1.5 rounded-full text-xs font-semibold border border-amber-900">
-                                        {e}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {parsed.events.length > 0 && (
-                        <div>
-                            <h3 className="text-sm font-bold text-zinc-100 uppercase tracking-widest mb-3">Event Categories</h3>
-                            <div className="flex flex-wrap gap-2">
-                                {parsed.events.map((e, idx) => (
-                                    <span key={idx} className="bg-zinc-900 text-zinc-300 px-3 py-1.5 rounded-md text-xs font-semibold border border-zinc-800">
-                                        {e}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    <div>
-                        <h3 className="text-sm font-bold text-zinc-100 uppercase tracking-widest mb-3">Patient Data</h3>
-                        <div className="flex flex-wrap gap-4 text-sm bg-zinc-950 p-4 rounded-lg border border-zinc-800">
-                            <div><span className="font-semibold text-zinc-500">Sex:</span> {parsed.patient?.sex || 'Unknown'}</div>
-                            {parsed.patient?.age && <div><span className="font-semibold text-zinc-500">Age:</span> {parsed.patient.age}</div>}
-                            {parsed.patient?.weight && <div><span className="font-semibold text-zinc-500">Weight:</span> {parsed.patient.weight}</div>}
-                        </div>
-                    </div>
-                    <div>
-                        <h3 className="text-sm font-bold text-zinc-100 uppercase tracking-widest mb-3">Raw Data Source</h3>
-                        <div className="bg-zinc-900 p-4 rounded-lg text-xs font-mono text-zinc-400 overflow-x-auto border border-zinc-800 max-h-64">
-                            <pre>{JSON.stringify(rawReport, null, 2)}</pre>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    )
-}
-
 

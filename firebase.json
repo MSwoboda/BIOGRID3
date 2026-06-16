@@ -1,0 +1,18 @@
+{
+  "firestore": [
+    {
+      "database": "biogrid",
+      "rules": "firestore.rules",
+      "indexes": "firestore.indexes.json"
+    }
+  ],
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "BioGrid3",
+        "supportEmail": "michswo@gmail.com",
+        "authorizedRedirectUris": ["http://localhost"]
+      }
+    }
+  }
+}

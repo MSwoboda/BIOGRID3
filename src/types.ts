@@ -38,11 +38,26 @@ export interface CountResult {
 export interface SearchHistoryItem {
   id: string;
   category: Category;
-  query: string;
+  query: string;          // display label (joined queries or first query)
+  queries: string[];      // all query terms
   timestamp: number;
+  saved?: boolean;        // true = pinned saved query
+  savedLabel?: string;    // user-chosen label for saved queries
+  filters?: {
+    startDate?: string;
+    endDate?: string;
+    limit?: number;
+    searchField?: string;
+  };
 }
 
 export interface ChartData {
   name: string;
   value: number;
+}
+export interface ManufacturerGroup {
+  id: string;
+  name: string;         // user-chosen display name, e.g. "Philips Respironics"
+  aliases: string[];    // all raw firm names that belong to this group
+  createdAt: number;
 }

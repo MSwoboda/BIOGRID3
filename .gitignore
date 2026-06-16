@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Python (agent/)
+agent/.venv/
+agent/__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
