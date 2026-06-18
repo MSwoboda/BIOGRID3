@@ -24,8 +24,8 @@ const CATEGORY_CONFIGS: Record<Category, { endpoint: string, searchFields: strin
   },
   tobacco: {
     endpoint: '/tobacco/problem.json',
-    searchFields: ['tobacco_product.product_brand_name'],
-    countQuery: 'adverse_experience.exact',
+    searchFields: ['tobacco_products', 'reported_health_problems'],
+    countQuery: 'reported_health_problems.exact',
     timeQuery: 'date_submitted'
   }
 };
@@ -42,27 +42,33 @@ export const SEARCH_FIELD_GROUPS: Partial<Record<Category, Record<string, { labe
     udi:          { label: 'UDI',                  fields: ['device.udi_di', 'device.udi_public'] },
   },
   drug: {
-    name:         { label: 'Drug / Brand Name',    fields: ['patient.drug.medicinalproduct', 'patient.drug.openfda.brand_name', 'patient.drug.openfda.generic_name'] },
-    manufacturer: { label: 'Manufacturer',         fields: ['patient.drug.openfda.manufacturer_name'] },
-    reaction:     { label: 'Reaction',             fields: ['patient.reaction.reactionmeddrapt'] },
-    ndc:          { label: 'NDC Code',             fields: ['patient.drug.openfda.ndc'] },
+    name:        { label: 'Drug / Brand Name',    fields: ['patient.drug.medicinalproduct', 'patient.drug.openfda.brand_name', 'patient.drug.openfda.generic_name'] },
+    reaction:    { label: 'Reaction (MedDRA)',     fields: ['patient.reaction.reactionmeddrapt'] },
+    manufacturer:{ label: 'Manufacturer',          fields: ['patient.drug.openfda.manufacturer_name'] },
+    ingredient:  { label: 'Active Ingredient',     fields: ['patient.drug.activesubstance.activesubstancename', 'patient.drug.openfda.substance_name'] },
+    indication:  { label: 'Drug Indication',       fields: ['patient.drug.drugindication'] },
+    report_id:   { label: 'Report ID',             fields: ['safetyreportid'] },
+    pharm_class: { label: 'Pharmacologic Class',   fields: ['patient.drug.openfda.pharm_class_epc'] },
   },
   food: {
-    name:         { label: 'Product / Brand Name', fields: ['products.name_brand', 'products.industry_name'] },
-    reaction:     { label: 'Reaction / Outcome',   fields: ['reactions'] },
+    name:        { label: 'Product / Brand Name', fields: ['products.name_brand'] },
+    reaction:    { label: 'Reaction / Symptom',    fields: ['reactions'] },
+    industry:    { label: 'Product Category',      fields: ['products.industry_name'] },
+    outcome:     { label: 'Outcome',               fields: ['outcomes'] },
+    report_id:   { label: 'Report Number',         fields: ['report_number'] },
   },
   tobacco: {
-    name:         { label: 'Product Brand Name',   fields: ['tobacco_product.product_brand_name'] },
-    experience:   { label: 'Adverse Experience',   fields: ['adverse_experience'] },
+    name:        { label: 'Product Type',          fields: ['tobacco_products'] },
+    problem:     { label: 'Health Problem',         fields: ['reported_health_problems'] },
   },
 };
 
 /** Order in which field groups are tried for auto-fallback */
 const FIELD_GROUP_FALLBACK_ORDER: Partial<Record<Category, string[]>> = {
   device: ['name', 'manufacturer', 'model', 'product_code', 'report_number', 'exemption', 'udi'],
-  drug:   ['name', 'manufacturer', 'reaction', 'ndc'],
-  food:   ['name', 'reaction'],
-  tobacco:['name', 'experience'],
+  drug:   ['name', 'reaction', 'manufacturer', 'ingredient', 'indication', 'pharm_class', 'report_id'],
+  food:   ['name', 'reaction', 'industry', 'outcome', 'report_id'],
+  tobacco:['name', 'problem'],
 };
 
 /**
@@ -79,6 +85,10 @@ export function detectQueryFieldKey(category: Category, query: string): string {
   }
   if (category === 'drug') {
     if (/^[0-9]{4}-[0-9]{4}-[0-9]{2}$/.test(q)) return 'ndc';
+    if (/^\d{7,10}$/.test(q)) return 'report_id';
+  }
+  if (category === 'food') {
+    if (/^\d{6,}$/.test(q)) return 'report_id';
   }
   return 'name';
 }
@@ -150,55 +160,131 @@ export function parseReport(category: Category, item: any) {
   let narrative = '';
   let deviceProblems: string[] = [];
   let patientProblems: string[] = [];
-  let patient: { sex?: string, age?: string, weight?: string } = {};
+  let patient: { sex?: string, age?: string, weight?: string, ageGroup?: string, country?: string } = {};
 
   switch (category) {
-    case 'drug':
+    case 'drug': {
       id = item.safetyreportid || generateId();
-      title = item.patient?.drug?.[0]?.medicinalproduct || 'Unknown Drug';
-      date = item.receiptdate || item.transmissiondate || '';
-      events = item.patient?.reaction?.map((r: any) => r.reactionmeddrapt) || [];
-      patient.sex = item.patient?.patientsex == '1' ? 'Male' : item.patient?.patientsex == '2' ? 'Female' : 'Unknown';
+      // Prefer suspect drug; fall back to first drug in list
+      const suspectDrug = item.patient?.drug?.find((d: any) => d.drugcharacterization === '1') || item.patient?.drug?.[0];
+      const brandName = Array.isArray(suspectDrug?.openfda?.brand_name) ? suspectDrug.openfda.brand_name[0] : null;
+      const genericName = Array.isArray(suspectDrug?.openfda?.generic_name) ? suspectDrug.openfda.generic_name[0] : null;
+      title = brandName || genericName || suspectDrug?.medicinalproduct || 'Unknown Drug';
+      date = item.receivedate || item.receiptdate || item.transmissiondate || '';
+      events = (item.patient?.reaction || []).map((r: any) => r.reactionmeddrapt).filter(Boolean);
+      // Demographics
+      const sexCode = item.patient?.patientsex;
+      patient.sex = sexCode === '1' ? 'Male' : sexCode === '2' ? 'Female' : 'Unknown';
+      const ageGroupCode = item.patient?.patientagegroup;
+      const ageGroupMap: Record<string, string> = { '1': 'Neonate', '2': 'Infant', '3': 'Child', '4': 'Adolescent', '5': 'Adult', '6': 'Elderly' };
+      patient.ageGroup = ageGroupCode ? (ageGroupMap[ageGroupCode] ?? '') : '';
+      const ageVal = item.patient?.patientonsetage;
+      const ageUnit = item.patient?.patientonsetageunit;
+      const ageUnitMap: Record<string, string> = { '800': 'decades', '801': 'yr', '802': 'mo', '803': 'wk', '804': 'days', '805': 'hr' };
+      patient.age = ageVal ? `${ageVal} ${ageUnit ? ageUnitMap[ageUnit] ?? '' : 'yr'}`.trim() : patient.ageGroup || '';
       patient.weight = item.patient?.patientweight ? `${item.patient.patientweight} kg` : '';
-      description = `Patient sex: ${patient.sex}. ${patient.weight ? `Weight: ${patient.weight}.` : ''}`;
+      patient.country = item.primarysourcecountry || item.occurcountry || '';
+      // Seriousness
+      const serious = item.serious === '1';
+      const fatal = item.seriousnessdeath === '1';
+      const hospitalized = item.seriousnesshospitalization === '1';
+      const lifeThreatening = item.seriousnesslifethreatening === '1';
+      // All drugs involved
+      const allDrugs: string[] = (item.patient?.drug || []).map((d: any) =>
+        Array.isArray(d.openfda?.brand_name) ? d.openfda.brand_name[0] : d.medicinalproduct
+      ).filter(Boolean);
+      // Build description
+      const severityLabel = fatal ? '⚠️ Fatal' : lifeThreatening ? '🔴 Life-threatening' : hospitalized ? '🏥 Hospitalized' : serious ? '⚡ Serious' : '';
+      const descParts = [
+        severityLabel,
+        patient.sex !== 'Unknown' ? patient.sex : '',
+        patient.age ? `Age: ${patient.age}` : '',
+        patient.country,
+        allDrugs.length > 1 ? `${allDrugs.length} drugs` : '',
+      ].filter(Boolean);
+      description = descParts.join(' · ') || 'No details';
       narrative = item.patient?.summary?.narrativeincludeclinical || '';
+      // patientProblems = reactions for Drug
+      patientProblems = events;
+      // deviceProblems = seriousness flags for Drug
+      deviceProblems = [
+        fatal ? 'Death' : '',
+        hospitalized ? 'Hospitalization' : '',
+        lifeThreatening ? 'Life Threatening' : '',
+        item.seriousnessdisabling === '1' ? 'Disabling' : '',
+        item.seriousnesscongenitalanomali === '1' ? 'Congenital Anomaly' : '',
+        item.seriousnessother === '1' ? 'Other Serious' : '',
+      ].filter(Boolean);
       break;
-    case 'device':
+    }
+    case 'device': {
       id = item.mdr_report_key || generateId();
       title = item.device?.[0]?.generic_name || item.device?.[0]?.brand_name || 'Unknown Device';
       date = item.date_received || item.date_of_event || '';
       events = [item.event_type].filter(Boolean);
       narrative = item.mdr_text?.find((t: any) => t.text_type_code === 'Description of Event or Problem')?.text || item.mdr_text?.[0]?.text || '';
       description = narrative || 'No description provided';
-      // Prefer human-readable text arrays; fall back to numeric code fields
       deviceProblems = Array.isArray(item.product_problems) && item.product_problems.length > 0
         ? item.product_problems.flat().filter(Boolean)
         : item.device?.flatMap((d: any) => d.device_problem_code ? [d.device_problem_code].flat() : []).filter(Boolean) ?? [];
-      let pArray = Array.isArray(item.patient) ? item.patient : (item.patient ? [item.patient] : []);
+      const pArray = Array.isArray(item.patient) ? item.patient : (item.patient ? [item.patient] : []);
       patientProblems = pArray.flatMap((p: any) =>
         Array.isArray(p.patient_problems) && p.patient_problems.length > 0
           ? p.patient_problems
           : p.patient_problem_code ? [p.patient_problem_code].flat() : []
       ).filter(Boolean);
       break;
-    case 'food':
+    }
+    case 'food': {
       id = item.report_number || generateId();
-      title = item.products?.[0]?.name_brand || item.products?.[0]?.industry_name || 'Unknown Food Product';
-      date = item.date_created || '';
-      events = item.reactions || item.outcomes || [];
-      patient.age = item.consumer?.age ? `${item.consumer.age} ${item.consumer.age_unit}` : '';
+      const allProducts: any[] = item.products || [];
+      const brandNames = allProducts.map((p: any) => p.name_brand).filter(Boolean);
+      const industryNames = [...new Set(allProducts.map((p: any) => p.industry_name).filter(Boolean))] as string[];
+      title = brandNames.join(' + ') || industryNames[0] || 'Unknown Food Product';
+      date = item.date_created || item.date_started || '';
+      // Events = reactions first, then outcomes
+      const reactions: string[] = item.reactions || [];
+      const outcomes: string[] = item.outcomes || [];
+      events = reactions.length > 0 ? reactions : outcomes;
+      // Demographics
       patient.sex = item.consumer?.gender || 'Unknown';
-      description = item.description || `Reported by: ${patient.age || 'Unknown age'}, ${patient.sex}`;
-      narrative = item.description || '';
+      const cAge = item.consumer?.age;
+      const cUnit = item.consumer?.age_unit || 'yr';
+      patient.age = cAge ? `${cAge} ${cUnit}` : '';
+      // Description
+      const outcomeLabel = outcomes.length > 0 ? outcomes.slice(0, 2).join(', ') : '';
+      const foodParts = [
+        outcomeLabel,
+        industryNames.length > 0 ? industryNames[0] : '',
+        patient.age ? `Age: ${patient.age}` : '',
+        patient.sex !== 'Unknown' ? patient.sex : '',
+      ].filter(Boolean);
+      description = foodParts.join(' · ') || 'No additional details';
+      narrative = '';
+      // For QuickFilter compatibility:
+      patientProblems = reactions;  // reactions = patient-side problems
+      deviceProblems = outcomes;    // outcomes = product-side consequences
       break;
-    case 'tobacco':
-      id = item.report_id || generateId();
-      title = item.tobacco_product?.[0]?.product_brand_name || 'Unknown Tobacco Product';
+    }
+    case 'tobacco': {
+      id = String(item.report_id ?? generateId());
+      const products: string[] = item.tobacco_products || [];
+      title = products.slice(0, 2).join(', ') || 'Unknown Tobacco Product';
       date = item.date_submitted || '';
-      events = item.adverse_experience || [];
-      description = item.problem_description || 'No description provided';
-      narrative = item.problem_description || '';
+      events = item.reported_health_problems || [];
+      const nonuser = item.nonuser_affected === 'Yes';
+      const numProblems: number = item.number_health_problems ?? events.length;
+      const tobaccoParts = [
+        nonuser ? '⚠️ Non-user affected' : '',
+        numProblems > 1 ? `${numProblems} health problems` : '',
+        products.length > 2 ? `${products.length} product types` : '',
+      ].filter(Boolean);
+      description = tobaccoParts.join(' · ') || 'See health problems below';
+      narrative = '';
+      patientProblems = item.reported_health_problems || [];
+      deviceProblems = products;  // product types
       break;
+    }
   }
 
   return { id, title, date, events, description, narrative, deviceProblems, patientProblems, patient };

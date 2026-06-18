@@ -1,5 +1,5 @@
 import React from 'react';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Category, SearchResult, CountResult, ManufacturerGroup } from './types';
 
 import { fetchFDAData, fetchFDACounts, fetchDeviceRecalls, fetchDeviceRecallCounts, extractDeviceIdentifiers, autoGroupManufacturers, parseReport, detectQueryFieldKey, probeFallbackFields, resolveSearchFields, SEARCH_FIELD_GROUPS } from './lib/api';
@@ -9,32 +9,86 @@ import type { DeviceIdentifier } from './lib/api';
 import { useStore } from './store';
 import { cn, formatDate, generateId } from './lib/utils';
 
-import { Search, FolderOpen, PieChart, List as ListIcon, Download, Bookmark, AlertTriangle, Clock, Box, Activity, Apple, Cigarette, ChevronDown, ChevronRight, History, PanelLeftClose, PanelLeft, Filter, X, ChevronLeft, Share2, Copy, Settings, LogOut, Pencil, Users, CheckCheck, Plus, Calendar } from 'lucide-react';
+import { Search, FolderOpen, PieChart, List as ListIcon, Download, Bookmark, AlertTriangle, Clock, Box, Activity, Apple, Cigarette, ChevronDown, ChevronRight, History, PanelLeftClose, PanelLeft, Filter, X, ChevronLeft, Share2, Copy, Settings, LogOut, Pencil, Users, CheckCheck, Plus, Calendar, CheckCircle2, BookmarkMinus } from 'lucide-react';
 
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import SavedScreen from './components/SavedScreen';
 import ReportModal from './components/ReportModal';
 import SplashScreen from './components/SplashScreen';
+import AuthModal from './components/AuthModal';
+import OnboardingFlow from './components/OnboardingFlow';
+import ProfileModal from './components/ProfileModal';
 import { useAuth } from './hooks/useAuth';
+
+// ── Toast system ─────────────────────────────────────────────────────────────
+type ToastItem = { id: string; message: string; type: 'success' | 'info' | 'remove' };
+
+function ToastContainer({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss: (id: string) => void }) {
+  return (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9999] flex flex-col gap-2 items-center pointer-events-none">
+      {toasts.map(t => (
+        <div
+          key={t.id}
+          onClick={() => onDismiss(t.id)}
+          className={cn(
+            'flex items-center gap-2.5 px-4 py-3 rounded-xl border text-sm font-semibold shadow-2xl pointer-events-auto cursor-pointer',
+            'animate-in fade-in slide-in-from-bottom-2 duration-200',
+            t.type === 'success' ? 'bg-emerald-950 border-emerald-700 text-emerald-200 shadow-emerald-900/40'
+            : t.type === 'remove' ? 'bg-zinc-900 border-zinc-700 text-zinc-300 shadow-zinc-900/40'
+            : 'bg-blue-950 border-blue-700 text-blue-200 shadow-blue-900/40'
+          )}
+        >
+          {t.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
+          {t.type === 'remove'  && <BookmarkMinus className="w-4 h-4 text-zinc-400 shrink-0" />}
+          {t.type === 'info'    && <Bookmark className="w-4 h-4 text-blue-400 shrink-0" />}
+          {t.message}
+          <X className="w-3.5 h-3.5 opacity-40 ml-1 shrink-0" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function useToast() {
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const show = useCallback((message: string, type: ToastItem['type'] = 'success') => {
+    const id = Math.random().toString(36).slice(2);
+    setToasts(ts => [...ts, { id, message, type }]);
+    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 3000);
+  }, []);
+  const dismiss = useCallback((id: string) => setToasts(ts => ts.filter(t => t.id !== id)), []);
+  return { toasts, show, dismiss };
+}
 
 // --- Subcomponents will be separated shortly, injecting them all in App.tsx for rapid iteration ---
 
 export default function App() {
-  const { user, loading: authLoading, authError, signIn, signOut } = useAuth();
+  const {
+    user, loading: authLoading, authError, profile, profileLoading, needsOnboarding,
+    signIn, signInWithEmail, signUpWithEmail, resetPassword, changePassword, deleteAccount,
+    saveProfile, signOut, clearAuthError,
+  } = useAuth();
   const store = useStore(user?.uid ?? null);
+  const { toasts, show: showToast, dismiss: dismissToast } = useToast();
 
   const [activeTab, setActiveTab] = useState<'search' | 'history' | 'saved'>('search');
+  const [pendingReplay, setPendingReplay] = React.useState<import('./types').SearchHistoryItem | null>(null);
   const [searchCategory, setSearchCategory] = useState<Category>('device');
   const [isDbsOpen, setIsDbsOpen] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
 
   const handleSelectCategory = (cat: Category) => {
     setSearchCategory(cat);
     setActiveTab('search');
   };
 
+  const isDemoMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('demo') === '1';
+
   // Show splash for unauthenticated users
-  if (authLoading) {
+  if (!isDemoMode && authLoading) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
@@ -45,23 +99,49 @@ export default function App() {
     );
   }
 
-  if (!user) {
-    return <SplashScreen onSignIn={signIn} loading={authLoading} authError={authError} />;
+  if (!isDemoMode && !user) {
+    return (
+      <>
+        <SplashScreen onShowAuth={() => setShowAuthModal(true)} loading={authLoading} authError={authError} />
+        <AuthModal
+          open={showAuthModal}
+          onClose={() => { setShowAuthModal(false); clearAuthError(); }}
+          onSignInGoogle={signIn}
+          onSignInEmail={signInWithEmail}
+          onSignUpEmail={signUpWithEmail}
+          onResetPassword={resetPassword}
+          authError={authError}
+          clearError={clearAuthError}
+        />
+      </>
+    );
+  }
+
+  // Post-signup onboarding wizard
+  if (!isDemoMode && user && needsOnboarding && !profileLoading) {
+    return (
+      <OnboardingFlow
+        uid={user.uid}
+        email={user.email ?? ''}
+        onComplete={saveProfile}
+      />
+    );
   }
 
   return (
+    <>
     <div className="flex h-screen bg-zinc-950 text-zinc-50 font-sans">
       {/* Sidebar */}
       <aside className={cn("bg-zinc-950 border-r border-zinc-800 flex flex-col shadow-sm z-20 shrink-0 transition-all duration-300", isSidebarOpen ? "w-64" : "w-16 items-center")}>
         <div className={cn("p-4 border-b border-zinc-800 flex items-center justify-between tracking-tight flex-shrink-0 h-16 w-full", !isSidebarOpen && "justify-center")}>
           {isSidebarOpen && (
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-blue-500/20">B</div>
-              <h1 className="text-xl font-bold tracking-tight text-zinc-100 uppercase">biogrid</h1>
+              <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center text-black font-black text-sm shadow-sm shrink-0">B</div>
+              <h1 className="text-sm font-black tracking-[0.15em] text-zinc-100 uppercase">BIOGRID</h1>
             </div>
           )}
           {!isSidebarOpen && (
-            <div className="w-8 h-8 rounded bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center text-white font-bold text-sm cursor-pointer shadow-lg" onClick={() => setIsSidebarOpen(true)}>B</div>
+            <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center text-black font-black text-sm cursor-pointer shadow-sm" onClick={() => setIsSidebarOpen(true)}>B</div>
           )}
           {isSidebarOpen && (
             <button onClick={() => setIsSidebarOpen(false)} className="text-zinc-500 hover:text-zinc-400 p-1">
@@ -137,30 +217,68 @@ export default function App() {
 
         {/* User account section at bottom of sidebar */}
         <div className={cn(
-          "border-t border-zinc-800 p-3 flex items-center gap-2.5 shrink-0",
-          !isSidebarOpen && "justify-center flex-col py-3"
+          "border-t border-zinc-800 shrink-0 flex items-center gap-1 p-2",
+          !isSidebarOpen && "flex-col justify-center"
         )}>
-          {user.photoURL ? (
-            <img src={user.photoURL} alt={user.displayName ?? 'User'}
-              className="w-8 h-8 rounded-full ring-2 ring-zinc-700 shrink-0" />
-          ) : (
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-white font-bold text-sm shrink-0">
-              {(user.displayName ?? user.email ?? 'U')[0].toUpperCase()}
-            </div>
-          )}
-          {isSidebarOpen && (
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-zinc-200 truncate">{user.displayName ?? 'User'}</p>
-              <p className="text-[10px] text-zinc-600 truncate">{user.email}</p>
-            </div>
-          )}
+          {/* Profile button */}
           <button
-            onClick={signOut}
-            title="Sign out"
-            className="p-1.5 text-zinc-600 hover:text-zinc-400 hover:bg-zinc-800 rounded-lg transition-colors shrink-0"
+            onClick={() => setShowProfileModal(true)}
+            title="Profile settings"
+            className={cn(
+              "flex items-center gap-2.5 rounded-xl hover:bg-zinc-800 transition-colors group min-w-0 flex-1 p-1.5",
+              !isSidebarOpen && "w-10 h-10 justify-center flex-none"
+            )}
           >
-            <LogOut className="w-3.5 h-3.5" />
+            {user.photoURL ? (
+              <img src={user.photoURL} alt={profile ? `${profile.firstName} ${profile.lastName}` : (user.displayName ?? 'User')}
+                className="w-7 h-7 rounded-full ring-2 ring-zinc-700 shrink-0" />
+            ) : (
+              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-white font-bold text-xs shrink-0">
+                {profile ? `${profile.firstName[0] ?? ''}${profile.lastName[0] ?? ''}`.toUpperCase() : (user.displayName ?? user.email ?? 'U')[0].toUpperCase()}
+              </div>
+            )}
+            {isSidebarOpen && (
+              <div className="flex-1 min-w-0 text-left">
+                <p className="text-xs font-semibold text-zinc-300 truncate group-hover:text-white transition-colors leading-tight">
+                  {profile ? `${profile.firstName} ${profile.lastName}` : (user.displayName ?? 'User')}
+                </p>
+                <p className="text-[10px] text-zinc-600 truncate leading-tight">{user.email}</p>
+              </div>
+            )}
           </button>
+
+          {/* Logout button — always visible */}
+          {confirmSignOut ? (
+            <div className="flex items-center gap-1 shrink-0">
+              <span className="text-[10px] text-red-400 font-semibold whitespace-nowrap">{isSidebarOpen ? 'Sign out?' : '?'}</span>
+              <button
+                onClick={async () => { setConfirmSignOut(false); await signOut(); }}
+                title="Yes, sign out"
+                className="w-6 h-6 flex items-center justify-center rounded-lg bg-red-700 hover:bg-red-600 text-white transition-colors shrink-0"
+              >
+                <LogOut className="w-3 h-3" />
+              </button>
+              <button
+                onClick={() => setConfirmSignOut(false)}
+                title="Cancel"
+                className="w-6 h-6 flex items-center justify-center rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors shrink-0"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { setConfirmSignOut(true); setTimeout(() => setConfirmSignOut(false), 4000); }}
+              title="Sign out"
+              className={cn(
+                "flex items-center justify-center rounded-xl transition-colors shrink-0",
+                "text-zinc-500 hover:text-red-400 hover:bg-red-950/40",
+                isSidebarOpen ? "w-8 h-8" : "w-10 h-10"
+              )}
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </aside>
 
@@ -169,13 +287,41 @@ export default function App() {
         <div className="flex-1 overflow-y-auto relative">
            {/* SearchScreen always mounted — CSS hide so state/results survive tab switches */}
            <div style={{ display: activeTab === 'search' ? undefined : 'none' }}>
-             <SearchScreen category={searchCategory} setCategory={setSearchCategory} store={store} />
+             <SearchScreen
+               category={searchCategory}
+               setCategory={setSearchCategory}
+               store={store}
+               pendingReplay={pendingReplay}
+               clearPendingReplay={() => setPendingReplay(null)}
+               showToast={showToast}
+             />
            </div>
-           {activeTab === 'history' && <HistoryScreen store={store} />}
+           {activeTab === 'history' && <HistoryScreen store={store} onReplay={(item) => {
+             setSearchCategory(item.category);
+             setActiveTab('search');
+             // We need to trigger replay inside SearchScreen — pass via a ref/event
+             // Use a small state in App to signal a pending replay
+             setPendingReplay(item);
+           }} />}
            {activeTab === 'saved' && <SavedScreen store={store} />}
         </div>
       </main>
-    </div>
+     </div>
+     <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+     {showProfileModal && user && (
+       <ProfileModal
+         open={showProfileModal}
+         onClose={() => setShowProfileModal(false)}
+         user={user}
+         profile={profile}
+         onSaveProfile={saveProfile}
+         onChangePassword={changePassword}
+         onResetPassword={resetPassword}
+         onDeleteAccount={deleteAccount}
+         onSignOut={async () => { setShowProfileModal(false); await signOut(); }}
+       />
+     )}
+    </>
   );
 }
 
@@ -529,7 +675,14 @@ function ProblemBarChart({
   );
 }
 
-function SearchScreen({ category, setCategory, store }: { category: Category, setCategory: (c: Category) => void, store: ReturnType<typeof useStore> }) {
+function SearchScreen({ category, setCategory, store, pendingReplay, clearPendingReplay, showToast }: {
+  category: Category;
+  setCategory: (c: Category) => void;
+  store: ReturnType<typeof useStore>;
+  pendingReplay?: import('./types').SearchHistoryItem | null;
+  clearPendingReplay?: () => void;
+  showToast?: (message: string, type?: 'success' | 'info' | 'remove') => void;
+}) {
   const [queries, setQueries] = useState<string[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [searchedQueries, setSearchedQueries] = useState<string[]>([]);
@@ -546,9 +699,54 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
   const [error, setError] = useState('');
   const [hasSearched, setHasSearched] = useState(false);
   
-  const { searchHistory, addSearchHistory } = store;
+  const { searchHistory, addSearchHistory, saveQuery, removeHistoryItem, updateHistoryItem } = store;
+
+  // Handle pending replay from HistoryScreen
+  React.useEffect(() => {
+    if (!pendingReplay) return;
+    const item = pendingReplay;
+    clearPendingReplay?.();
+    // Restore queries and filters
+    const qs = item.queries?.length ? item.queries : [item.query];
+    setQueries(qs);
+    setInputValue('');
+    if (item.filters?.startDate !== undefined || item.filters?.endDate !== undefined) {
+      setFilters(prev => ({ ...prev,
+        startDate: item.filters?.startDate ?? '',
+        endDate: item.filters?.endDate ?? '',
+        limit: item.filters?.limit ?? 500,
+        searchField: item.filters?.searchField ?? 'auto',
+      }));
+    }
+    // Fire search after state update
+    setTimeout(() => handleSearch(undefined, qs), 0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingReplay]);
+
+  const [showSaveSearch, setShowSaveSearch] = React.useState(false);
+  const [saveSearchLabel, setSaveSearchLabel] = React.useState('');
+  const [showDatePopover, setShowDatePopover] = React.useState(false);
+  const [pendingStartDate, setPendingStartDate] = React.useState('');
+  const [pendingEndDate, setPendingEndDate] = React.useState('');
+  const datePopoverRef = React.useRef<HTMLDivElement>(null);
+  const saveSearchRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!showDatePopover) return;
+    const h = (e: MouseEvent) => { if (datePopoverRef.current && !datePopoverRef.current.contains(e.target as Node)) setShowDatePopover(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [showDatePopover]);
+
+  React.useEffect(() => {
+    if (!showSaveSearch) return;
+    const h = (e: MouseEvent) => { if (saveSearchRef.current && !saveSearchRef.current.contains(e.target as Node)) setShowSaveSearch(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [showSaveSearch]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const [inputFocused, setInputFocused] = React.useState(false);
 
   // New controls
   const [currentPage, setCurrentPage] = useState(1);
@@ -718,9 +916,15 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
       const limitToFetch = filters.limit === 'All' ? Infinity : (filters.limit as number);
       const perQueryLimit = Math.ceil(limitToFetch === Infinity ? Infinity : limitToFetch / effectiveQueries.length);
 
-      for (const q of effectiveQueries) {
-        addSearchHistory(category, q);
+      // Save combined history item once per search (not per query term)
+      addSearchHistory(category, effectiveQueries, {
+        startDate: filters.startDate,
+        endDate: filters.endDate,
+        limit: typeof filters.limit === 'number' ? filters.limit : 500,
+        searchField: filters.searchField,
+      });
 
+      for (const q of effectiveQueries) {
         // --- Step 1: determine initial field group ---
         const manualField = filters.searchField !== 'auto' ? filters.searchField : null;
         let fieldKey = manualField ?? detectQueryFieldKey(category, q);
@@ -849,14 +1053,62 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
 
   const filteredResults = results.filter(r => {
       const parsed = parseReport(category, r);
+      // Events / reactions / health problems (shared across all categories via parsed.events)
       if (!applyDim(filters.eventTypes, parsed.events)) return false;
-      if (!applyDim(filters.manufacturers, [r.device?.[0]?.manufacturer_d_name || ''])) return false;
-      if (!applyDim(filters.deviceNames, [r.device?.[0]?.generic_name || ''])) return false;
-      if (!applyDim(filters.eventLocations, [r.event_location || ''])) return false;
-      if (!applyDim(filters.reportSources, [r.report_source_code || ''])) return false;
-      if (!applyDim(filters.reporterStates, [r.reporter_state_code || ''])) return false;
-      if (!applyDim(filters.sexes, [parsed.patient?.sex || ''])) return false;
-      // Patient & product problem filters
+      // Category-specific dimension filters
+      if (category === 'device') {
+        if (!applyDim(filters.manufacturers, [r.device?.[0]?.manufacturer_d_name || ''])) return false;
+        if (!applyDim(filters.deviceNames, [r.device?.[0]?.generic_name || ''])) return false;
+        if (!applyDim(filters.eventLocations, [r.event_location || ''])) return false;
+        if (!applyDim(filters.reportSources, [r.report_source_code || ''])) return false;
+        if (!applyDim(filters.reporterStates, [r.reporter_state_code || ''])) return false;
+      } else if (category === 'drug') {
+        // manufacturers = drug manufacturer
+        const mfrNames: string[] = (r.patient?.drug || []).flatMap((d: any) =>
+          Array.isArray(d.openfda?.manufacturer_name) ? d.openfda.manufacturer_name : []
+        );
+        if (!applyDim(filters.manufacturers, mfrNames.length > 0 ? mfrNames : [''])) return false;
+        // deviceNames = drug brand/product name
+        const drugNames: string[] = (r.patient?.drug || []).map((d: any) =>
+          Array.isArray(d.openfda?.brand_name) ? d.openfda.brand_name[0] : d.medicinalproduct
+        ).filter(Boolean);
+        if (!applyDim(filters.deviceNames, drugNames.length > 0 ? drugNames : [''])) return false;
+        // eventLocations = country
+        if (!applyDim(filters.eventLocations, [r.primarysourcecountry || r.occurcountry || ''])) return false;
+        // reportSources = reporter qualification
+        const qualMap: Record<string, string> = { '1': 'Physician', '2': 'Pharmacist', '3': 'Health Professional', '4': 'Lawyer', '5': 'Consumer' };
+        const qual = qualMap[r.primarysource?.qualification] || r.primarysource?.qualification || '';
+        if (!applyDim(filters.reportSources, [qual])) return false;
+        // seriousness filter via eventTypes already handles — also filter by serious flag
+        if (filters.reporterStates.include.length > 0) {
+          // re-use reporterStates dim for serious filter ("Serious"/"Non-serious")
+          const isSerious = r.serious === '1' ? 'Serious' : 'Non-serious';
+          if (!applyDim(filters.reporterStates, [isSerious])) return false;
+        }
+      } else if (category === 'food') {
+        // manufacturers = industry name
+        const industries: string[] = (r.products || []).map((p: any) => p.industry_name).filter(Boolean);
+        if (!applyDim(filters.manufacturers, industries.length > 0 ? industries : [''])) return false;
+        // deviceNames = brand name
+        const brands: string[] = (r.products || []).map((p: any) => p.name_brand).filter(Boolean);
+        if (!applyDim(filters.deviceNames, brands.length > 0 ? brands : [''])) return false;
+        // sex filter
+        if (!applyDim(filters.sexes, [r.consumer?.gender || ''])) return false;
+      } else if (category === 'tobacco') {
+        // deviceNames = product types
+        const tobaccoProducts: string[] = r.tobacco_products || [];
+        if (!applyDim(filters.deviceNames, tobaccoProducts.length > 0 ? tobaccoProducts : [''])) return false;
+        // reporterStates dim = nonuser affected filter
+        if (filters.reporterStates.include.length > 0) {
+          const nonuser = r.nonuser_affected === 'Yes' ? 'Yes' : 'No';
+          if (!applyDim(filters.reporterStates, [nonuser])) return false;
+        }
+      }
+      // Shared: sex filter (device and drug)
+      if (category !== 'food' && category !== 'tobacco') {
+        if (!applyDim(filters.sexes, [parsed.patient?.sex || ''])) return false;
+      }
+      // Patient & product problem filters (shared, using parsed)
       if (filters.patientProblems.include.length > 0) {
           const pp = parsed.patientProblems as string[];
           if (!filters.patientProblems.include.some((inc: string) => pp.includes(inc))) return false;
@@ -889,13 +1141,15 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
   // ── Keyword filter (client-side full-text) ────────────────────────────────
   const getReportText = (r: any): string => {
     const parsed = parseReport(category, r);
-    return [
+    const base = [
       parsed.title,
       parsed.description,
       parsed.narrative,
       ...(parsed.events ?? []),
       ...(parsed.deviceProblems ?? []),
       ...(parsed.patientProblems ?? []),
+    ];
+    const extra = category === 'device' ? [
       r.device?.[0]?.manufacturer_d_name,
       r.device?.[0]?.brand_name,
       r.device?.[0]?.generic_name,
@@ -905,9 +1159,31 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
       r.reporter_state_code,
       r.event_location,
       r.mdr_report_key,
+    ] : category === 'drug' ? [
       r.safetyreportid,
+      r.primarysourcecountry,
+      r.occurcountry,
+      ...(r.patient?.drug || []).flatMap((d: any) => [
+        d.medicinalproduct,
+        ...(Array.isArray(d.openfda?.brand_name) ? d.openfda.brand_name : []),
+        ...(Array.isArray(d.openfda?.generic_name) ? d.openfda.generic_name : []),
+        ...(Array.isArray(d.openfda?.manufacturer_name) ? d.openfda.manufacturer_name : []),
+        d.drugindication,
+        ...(Array.isArray(d.openfda?.pharm_class_epc) ? d.openfda.pharm_class_epc : []),
+      ]),
+    ] : category === 'food' ? [
       r.report_number,
-    ].filter(Boolean).join(' ').toLowerCase();
+      ...(r.products || []).flatMap((p: any) => [p.name_brand, p.industry_name]),
+      ...(r.reactions || []),
+      ...(r.outcomes || []),
+      r.consumer?.gender,
+    ] : category === 'tobacco' ? [
+      String(r.report_id ?? ''),
+      ...(r.tobacco_products || []),
+      ...(r.reported_health_problems || []),
+      r.nonuser_affected,
+    ] : [];
+    return [...base, ...extra].filter(Boolean).join(' ').toLowerCase();
   };
 
   const keywordFilteredResults = React.useMemo(() => {
@@ -944,15 +1220,16 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       {/* Top Search Header */}
-      <div className="bg-zinc-950 border-b border-zinc-800 p-8 shadow-sm z-10 sticky top-0 flex flex-col gap-6">
+      <div className="bg-zinc-950 border-b border-zinc-800 p-8 shadow-sm z-10 flex flex-col gap-6">
         <div className="flex items-start justify-between">
             <h2 className="text-3xl font-bold tracking-tight text-zinc-100">Global Database Search</h2>
         </div>
         
-        <form onSubmit={e => handleSearch(e)} className="flex items-center w-full max-w-5xl relative">
-            {/* Multi-query pill input */}
+        <div className="w-full max-w-7xl ml-auto relative">
+        <form onSubmit={e => handleSearch(e)} className="flex items-center gap-2 w-full">
+            {/* Multi-query pill input — grows, but never pushes icons off */}
             <div
-                className="flex-1 relative flex items-center flex-wrap gap-2 bg-zinc-900 border border-zinc-800 rounded-full px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-zinc-700 cursor-text min-h-[56px]"
+                className="flex-1 min-w-0 relative flex items-center flex-nowrap gap-2 bg-zinc-900 border border-zinc-800 rounded-full px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-zinc-700 cursor-text overflow-x-auto overflow-y-hidden scrollbar-none h-[48px]"
                 onClick={() => inputRef.current?.focus()}
             >
                 <Search className="w-5 h-5 text-zinc-500 shrink-0 self-center" />
@@ -977,8 +1254,8 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
                     type="text"
                     value={inputValue}
                     onChange={e => { setInputValue(e.target.value); setShowSuggestions(true); }}
-                    onFocus={() => setShowSuggestions(true)}
-                    onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                    onFocus={() => { setShowSuggestions(true); setInputFocused(true); }}
+                    onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); setTimeout(() => setInputFocused(false), 200); }}
                     onKeyDown={e => {
                         if ((e.key === 'Enter' || e.key === ',') && inputValue.trim()) {
                             e.preventDefault();
@@ -993,21 +1270,6 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
                     className="flex-1 min-w-36 bg-transparent text-base focus:outline-none text-zinc-100 placeholder:text-zinc-500 self-center"
                 />
 
-                {/* Right-side controls */}
-                <div className="flex items-center gap-2 shrink-0 self-center ml-auto">
-                    {(queries.length > 0 || inputValue.trim()) && (
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="flex items-center gap-2 px-4 py-2 bg-zinc-100 text-zinc-950 font-semibold rounded-full text-sm hover:bg-zinc-200 transition-colors disabled:opacity-50 shrink-0"
-                        >
-                            <Search className="w-4 h-4" />
-                            {queries.length > 1 || (queries.length === 1 && inputValue.trim()) ? `Search ${queries.length + (inputValue.trim() ? 1 : 0)}` : 'Search'}
-                        </button>
-                    )}
-                </div>
-
-                {/* Suggestions Dropdown */}
                 {showSuggestions && suggestions.length > 0 && (
                     <div className="absolute left-0 right-0 top-full mt-2 bg-zinc-900 border border-zinc-800 rounded-xl shadow-xl overflow-hidden z-20">
                         {suggestions.map((suggestion, idx) => (
@@ -1016,7 +1278,6 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
                                 type="button"
                                 onMouseDown={e => {
                                     e.preventDefault();
-                                    // Add suggestion as a pill and search
                                     const next = queries.includes(suggestion) ? queries : [...queries, suggestion];
                                     setQueries(next);
                                     setInputValue('');
@@ -1032,7 +1293,281 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
                     </div>
                 )}
             </div>
+
+            {/* Right-side controls — OUTSIDE pill div so they never wrap */}
+            <div className="flex items-center gap-2 shrink-0">
+                    {/* Filter icon — always visible in search bar */}
+                    {(() => {
+                      const activeCount = [
+                        filters.eventTypes, filters.manufacturers, filters.deviceNames,
+                        filters.eventLocations, filters.reportSources, filters.reporterStates,
+                        filters.sexes, filters.patientProblems, filters.productProblems
+                      ].reduce((n, d) => n + d.include.length + d.exclude.length, 0)
+                        + (filters.startDate ? 1 : 0) + (filters.endDate ? 1 : 0)
+                        + (filters.searchField !== 'auto' ? 1 : 0);
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => setShowFiltersModal(true)}
+                          className={`relative flex items-center gap-1.5 px-3 py-2 rounded-full text-sm font-medium transition-colors ${
+                            activeCount > 0
+                              ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400 hover:bg-blue-600/30'
+                              : 'border border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-600'
+                          }`}
+                          title="Search filters"
+                        >
+                          <Filter className="w-4 h-4" />
+                          {activeCount > 0 && (
+                            <span className="text-xs font-bold">{activeCount}</span>
+                          )}
+                        </button>
+                      );
+                    })()}
+                    {(queries.length > 0 || inputValue.trim()) && (
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="flex items-center gap-2 px-4 py-2 bg-zinc-100 text-zinc-950 font-semibold rounded-full text-sm hover:bg-zinc-200 transition-colors disabled:opacity-50 shrink-0"
+                        >
+                            <Search className="w-4 h-4" />
+                            {queries.length > 1 || (queries.length === 1 && inputValue.trim()) ? `Search ${queries.length + (inputValue.trim() ? 1 : 0)}` : 'Search'}
+                        </button>
+                    )}
+            </div>
         </form>
+
+        {/* ── Search hint tooltip — anchored to outer relative wrapper ── */}
+        {inputFocused && !loading && results.length === 0 && (
+          <div className="absolute left-0 top-full mt-2 z-50 pointer-events-none">
+            {/* Arrow pointing up */}
+            <div className="w-3 h-3 border-l border-t border-zinc-700 bg-zinc-900 rotate-45 ml-6 -mb-1.5 relative z-10" />
+            <div className="bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-xl shadow-2xl px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">
+              {!inputValue.trim() && queries.length === 0 && (
+                <span className="text-zinc-500">Type a drug, device, food product or report ID to begin</span>
+              )}
+              {inputValue.trim() && queries.length === 0 && (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-200 font-mono text-[10px] leading-none">↵ Enter</kbd>
+                    <span>to <strong className="text-zinc-200">confirm term</strong> as a search pill</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-200 font-mono text-[10px] leading-none">,</kbd>
+                    <span>to add a <strong className="text-zinc-200">second term</strong> without confirming first</span>
+                  </div>
+                </div>
+              )}
+              {!inputValue.trim() && queries.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-200 font-mono text-[10px] leading-none">↵ Enter</kbd>
+                    <span>or click <strong className="text-zinc-200">Search</strong> to run the search</span>
+                  </div>
+                  <div className="text-zinc-600">or keep typing to add another term</div>
+                </div>
+              )}
+              {inputValue.trim() && queries.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-200 font-mono text-[10px] leading-none">↵ Enter</kbd>
+                    <span>to <strong className="text-zinc-200">confirm term</strong> — then Enter again to search</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-200 font-mono text-[10px] leading-none">,</kbd>
+                    <span>to add term <strong className="text-zinc-200">and continue typing</strong></span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        </div>
+
+        {/* Controls Bar — shows below search when results present */}
+        {(loading || results.length > 0) && (
+          <div className="w-full max-w-7xl ml-auto">
+               {/* Controls Bar */}
+               {/* Controls Bar — compact single row */}
+               <div className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-lg shadow-sm border border-zinc-800 overflow-hidden">
+
+                  {/* LEFT: count + pills — shrinks gracefully */}
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden text-xs">
+                     {loading && <div className="w-3 h-3 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin shrink-0"></div>}
+                     <span className="font-bold text-zinc-100 shrink-0">{keywordFilteredResults.length}</span>
+                     {keywordFilteredResults.length !== filteredResults.length && (
+                       <span className="text-zinc-600 shrink-0">/{filteredResults.length}</span>
+                     )}
+                     <span className="text-zinc-500 shrink-0">for</span>
+
+                     {/* Query pills — truncate label */}
+                     {searchedQueries.map((q, i) => {
+                       const qf = queryFieldsUsed[q];
+                       const abbrev = qf ? qf.label.split(/[\s/]+/).map((w: string) => w[0]).join('').toUpperCase() : '';
+                       return (
+                         <span key={i} className="inline-flex items-center gap-1 font-semibold rounded-full border px-2 py-0.5 shrink-0 max-w-[140px]"
+                           style={{ background: qf?.fallback ? 'rgba(234,179,8,0.1)' : 'rgba(63,63,70,0.6)', borderColor: qf?.fallback ? 'rgba(234,179,8,0.3)' : 'rgba(63,63,70,1)', color: qf?.fallback ? '#eab308' : '#e4e4e7' }}
+                         >
+                           <Search className="w-2.5 h-2.5 opacity-60 shrink-0" />
+                           <span className="truncate">{q}</span>
+                           {qf && <span className="opacity-50 shrink-0 ml-0.5">{abbrev}{qf.fallback ? '\u26a1' : ''}</span>}
+                         </span>
+                       );
+                     })}
+
+                     {/* Date pill — compact YYYY-MM format */}
+                     {(() => {
+                       let d: string;
+                       const hasF = !!(filters.startDate || filters.endDate);
+                       const ym = (s: string) => s.slice(0, 7);
+                       if (hasF) {
+                         d = filters.startDate && filters.endDate
+                           ? `${ym(filters.startDate)}\u2192${ym(filters.endDate)}`
+                           : filters.startDate ? `\u2265${ym(filters.startDate)}` : `\u2264${ym(filters.endDate || '')}`;
+                       } else if (results.length > 0) {
+                         const ds = results.map((r: any) => { const p = parseReport(category, r); return (p.date as string || ''); })
+                           .filter(Boolean).map((s: string) => s.replace(/-/g,'').padEnd(8,'0')).sort();
+                         d = ds.length ? `${ds[0].slice(0,4)}-${ds[0].slice(4,6)}\u2192${ds[ds.length-1].slice(0,4)}-${ds[ds.length-1].slice(4,6)}` : 'all dates';
+                       } else { d = 'all dates'; }
+                       return (
+                         <div className="relative shrink-0" ref={datePopoverRef}>
+                           <button
+                             onClick={() => { setShowDatePopover(s => !s); setPendingStartDate(filters.startDate); setPendingEndDate(filters.endDate); }}
+                             className={`inline-flex items-center gap-1 font-semibold rounded-full border px-2 py-0.5 transition-colors whitespace-nowrap ${hasF ? 'bg-violet-950/60 border-violet-800 text-violet-300 hover:bg-violet-900/50' : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'}`}
+                           >
+                             <Calendar className="w-2.5 h-2.5 opacity-80 shrink-0" />
+                             {d}
+                             {hasF && <span onClick={e => { e.stopPropagation(); setFilters((f: any) => ({ ...f, startDate: '', endDate: '' })); }} className="opacity-60 hover:opacity-100 cursor-pointer">&times;</span>}
+                           </button>
+                           {showDatePopover && (
+                             <div className="absolute left-0 top-full mt-2 z-50 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-3 space-y-3 w-72">
+                               <div className="flex items-center justify-between">
+                                 <span className="text-xs font-bold text-zinc-300">Set Date Range</span>
+                                 <button onClick={() => setShowDatePopover(false)} className="text-zinc-600 hover:text-zinc-400"><X className="w-3.5 h-3.5" /></button>
+                               </div>
+                               <div className="grid grid-cols-2 gap-2">
+                                 <div>
+                                   <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">From</label>
+                                   <input type="date" value={pendingStartDate} onChange={e => setPendingStartDate(e.target.value)}
+                                     className="w-full px-2.5 py-1.5 bg-zinc-950 border border-zinc-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 text-zinc-300" />
+                                 </div>
+                                 <div>
+                                   <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">To</label>
+                                   <input type="date" value={pendingEndDate} onChange={e => setPendingEndDate(e.target.value)}
+                                     className="w-full px-2.5 py-1.5 bg-zinc-950 border border-zinc-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 text-zinc-300" />
+                                 </div>
+                               </div>
+                               <div className="flex flex-wrap gap-1.5">
+                                 {[
+                                   { label: 'Last yr', from: `${new Date().getFullYear()-1}-01-01`, to: `${new Date().getFullYear()-1}-12-31` },
+                                   { label: 'Last 2yr', from: `${new Date().getFullYear()-2}-01-01`, to: '' },
+                                   { label: 'Last 5yr', from: `${new Date().getFullYear()-5}-01-01`, to: '' },
+                                   { label: '2020-24', from: '2020-01-01', to: '2024-12-31' },
+                                 ].map(p => (
+                                   <button key={p.label} onClick={() => { setPendingStartDate(p.from); setPendingEndDate(p.to); }}
+                                     className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors">{p.label}</button>
+                                 ))}
+                               </div>
+                               <div className="flex gap-2">
+                                 <button
+                                   onClick={() => { setFilters((f: any) => ({ ...f, startDate: pendingStartDate, endDate: pendingEndDate })); setShowDatePopover(false); }}
+                                   className="flex-1 py-1.5 text-xs font-semibold bg-zinc-800 border border-zinc-700 text-zinc-300 rounded-lg hover:bg-zinc-700 transition-colors"
+                                 >Apply</button>
+                                 <button
+                                   onClick={() => { setFilters((f: any) => ({ ...f, startDate: pendingStartDate, endDate: pendingEndDate })); setShowDatePopover(false); handleSearch(undefined, searchedQueries); }}
+                                   className="flex-1 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors"
+                                 >&circlearrowleft; Re-run</button>
+                               </div>
+                             </div>
+                           )}
+                         </div>
+                       );
+                     })()}
+
+                     {/* Limit pill */}
+                     <button onClick={() => setShowFiltersModal(true)}
+                       className="inline-flex items-center gap-0.5 font-semibold rounded-full border px-2 py-0.5 bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors shrink-0 whitespace-nowrap"
+                       title="Change result limit">
+                       <span className="opacity-60">&uarr;</span>{filters.limit === 'All' ? 'All' : `${filters.limit}`}
+                     </button>
+
+                     {loading && <span className="text-zinc-600 animate-pulse shrink-0">loading&hellip;</span>}
+                  </div>
+
+                  {/* RIGHT: actions — never wrap */}
+                  <div className="flex items-center gap-2 shrink-0">
+                     {hasSearched && searchedQueries.length > 0 && (
+                       <div className="relative" ref={saveSearchRef}>
+                         <button
+                           onClick={() => { setShowSaveSearch(s => !s); setSaveSearchLabel(searchedQueries.join(', ')); }}
+                           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 text-xs font-semibold text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 transition-colors whitespace-nowrap"
+                           title="Save this search"
+                         >
+                           <Bookmark className="w-3.5 h-3.5" /> Save
+                         </button>
+                         {showSaveSearch && (
+                           <div className="absolute right-0 top-full mt-2 z-50 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-3 space-y-2 w-72">
+                             <p className="text-xs font-bold text-zinc-300">Save this search</p>
+                             <input
+                               autoFocus
+                               type="text" value={saveSearchLabel} onChange={e => setSaveSearchLabel(e.target.value)}
+                               placeholder="Label for this search\u2026"
+                               onKeyDown={e => {
+                                 if (e.key === 'Enter' && saveSearchLabel.trim()) {
+                                   const currentItem: import('./types').SearchHistoryItem = {
+                                     id: '', category, query: searchedQueries.join(', '),
+                                     queries: searchedQueries, timestamp: Date.now(),
+                                     filters: { startDate: filters.startDate, endDate: filters.endDate, limit: typeof filters.limit === 'number' ? filters.limit : 500, searchField: filters.searchField },
+                                   };
+                                   saveQuery(currentItem, saveSearchLabel.trim());
+                                   setShowSaveSearch(false);
+                                   showToast?.(`Search "${saveSearchLabel.trim()}" saved`, 'info');
+                                 }
+                               }}
+                               className="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded-lg text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500"
+                             />
+                             <p className="text-[10px] text-zinc-600">Queries: {searchedQueries.map(q => `"${q}"`).join(', ')}</p>
+                             {(filters.startDate || filters.endDate) && (
+                               <p className="text-[10px] text-violet-600">\uD83D\uDCC5 {filters.startDate || '\u2026'} &rarr; {filters.endDate || '\u2026'}</p>
+                             )}
+                             <button
+                               disabled={!saveSearchLabel.trim()}
+                               onClick={() => {
+                                 const currentItem: import('./types').SearchHistoryItem = {
+                                   id: '', category, query: searchedQueries.join(', '),
+                                   queries: searchedQueries, timestamp: Date.now(),
+                                   filters: { startDate: filters.startDate, endDate: filters.endDate, limit: typeof filters.limit === 'number' ? filters.limit : 500, searchField: filters.searchField },
+                                 };
+                                 saveQuery(currentItem, saveSearchLabel.trim());
+                                 setShowSaveSearch(false);
+                               }}
+                               className="w-full py-2 text-xs font-bold bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg transition-colors"
+                             >
+                               \uD83D\uDD16 Save to History
+                             </button>
+                           </div>
+                         )}
+                       </div>
+                     )}
+
+                     {viewMode === 'list' && (
+                       <select value={rowsPerPage} onChange={e => {setRowsPerPage(parseInt(e.target.value)); setCurrentPage(1);}}
+                         className="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-1 text-xs text-zinc-300 outline-none"
+                         title="Rows per page">
+                         <option value={20}>20</option>
+                         <option value={50}>50</option>
+                         <option value={100}>100</option>
+                       </select>
+                     )}
+
+                     <button onClick={exportAsCSV} className="flex items-center gap-1.5 px-2.5 py-1.5 border border-zinc-800 text-zinc-400 rounded hover:bg-zinc-900 text-xs font-semibold whitespace-nowrap">
+                       <Download className="w-3.5 h-3.5" /> Export
+                     </button>
+                  </div>
+               </div>
+          </div>
+        )}
+
       </div>
 
       {/* Content Area */}
@@ -1074,90 +1609,33 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
                         </button>
                     )}
                 </div>
-               {/* Controls Bar */}
-               <div className="flex items-center justify-between bg-zinc-950 px-4 py-3 rounded-lg shadow-sm border border-zinc-800 sticky top-0 z-10">
-                  <div className="flex items-center gap-3 px-2 text-sm">
-                     {loading && <div className="w-4 h-4 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin"></div>}
-                      <span className="flex items-center gap-2 flex-wrap">
-                         <span className="font-bold text-zinc-100">{keywordFilteredResults.length}</span>
-                         {keywordFilteredResults.length !== filteredResults.length && (
-                           <span className="text-zinc-600 text-xs">(of {filteredResults.length})</span>
-                         )}
-                         <span className="text-zinc-500">results for</span>
-                         {searchedQueries.map((q, i) => {
-                           const qf = queryFieldsUsed[q];
-                           return (
-                             <span key={i} className="inline-flex items-center gap-1.5 text-xs font-semibold rounded-full border px-2.5 py-1"
-                               style={{ background: qf?.fallback ? 'rgba(234,179,8,0.1)' : 'rgba(63,63,70,0.6)', borderColor: qf?.fallback ? 'rgba(234,179,8,0.3)' : 'rgba(63,63,70,1)', color: qf?.fallback ? '#eab308' : '#e4e4e7' }}
-                             >
-                               <Search className="w-3 h-3 opacity-60" />
-                               {q}
-                               {qf && <span className="opacity-60">· {qf.label}{qf.fallback ? ' ⚡' : ''}</span>}
-                             </span>
-                           );
-                         })}
-                          {/* Date range pill */}
-                          {(filters.startDate || filters.endDate) && (
-                            <button
-                              onClick={() => setShowFiltersModal(true)}
-                              className="inline-flex items-center gap-1.5 text-xs font-semibold rounded-full border px-2.5 py-1 bg-violet-950/60 border-violet-800 text-violet-300 hover:bg-violet-900/50 transition-colors"
-                            >
-                              <Calendar className="w-3 h-3 opacity-80" />
-                              {filters.startDate && filters.endDate
-                                ? `${filters.startDate} → ${filters.endDate}`
-                                : filters.startDate
-                                ? `From ${filters.startDate}`
-                                : `To ${filters.endDate}`}
-                              <button
-                                onClick={e => { e.stopPropagation(); setFilters((f: any) => ({ ...f, startDate: '', endDate: '' })); }}
-                                className="ml-0.5 opacity-60 hover:opacity-100"
-                              >×</button>
-                            </button>
-                          )}
-                         {loading && <span className="text-xs text-zinc-600 animate-pulse">searching…</span>}
-                      </span>
-                  </div>
-                  
-                  <div className="flex items-center gap-4">
-                      {viewMode === 'list' && (
-                          <div className="flex items-center gap-2">
-                             <span className="text-xs font-semibold text-zinc-500">Rows:</span>
-                             <select value={rowsPerPage} onChange={e => {setRowsPerPage(parseInt(e.target.value)); setCurrentPage(1);}} className="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-1 text-xs text-zinc-300 outline-none">
-                                <option value={20}>20</option>
-                                <option value={50}>50</option>
-                                <option value={100}>100</option>
-                             </select>
-                          </div>
-                      )}
-                      
-                      <button onClick={exportAsCSV} className="flex items-center gap-2 px-3 py-1.5 border border-zinc-800 text-zinc-400 rounded hover:bg-zinc-950 text-xs font-semibold shadow-sm">
-                          <Download className="w-3.5 h-3.5" /> Export
-                      </button>
-                      
-                  </div>
-               </div>
 
+               {/* Keyword search + Quick filters — below tabs, above results */}
+               {(loading || results.length > 0) && (
+                 <div className="flex flex-col gap-2 mb-4">
+                   <KeywordSearchBar
+                     keywordFilter={keywordFilter}
+                     setKeywordFilter={setKeywordFilter}
+                     totalResults={filteredResults.length}
+                     matchCount={keywordFilteredResults.length}
+                   />
+                   <QuickFilterBar
+                     filters={filters}
+                     setFilters={setFilters}
+                     results={results}
+                     category={category}
+                     onOpenMore={() => setShowFiltersModal(true)}
+                   />
+                 </div>
+               )}
+
+               
                {/* Results Views */}
                {viewMode === 'list' && (
                    <div className="space-y-4">
-                       {/* Keyword search bar */}
-                       <KeywordSearchBar
-                         keywordFilter={keywordFilter}
-                         setKeywordFilter={setKeywordFilter}
-                         totalResults={filteredResults.length}
-                         matchCount={keywordFilteredResults.length}
-                       />
-                       {/* Quick filter bar — expanded inline filters + More button */}
-                       <QuickFilterBar
-                         filters={filters}
-                         setFilters={setFilters}
-                         results={results}
-                         category={category}
-                         onOpenMore={() => setShowFiltersModal(true)}
-                       />
                        <div className="grid grid-cols-1 gap-4">
                            {paginatedResults.map((r, i) => (
-                                <ReportCard key={i} rawReport={r} category={category} onClick={() => setSelectedReport(r)} store={store} />
+                                <ReportCard key={i} rawReport={r} category={category} onClick={() => setSelectedReport(r)} store={store} showToast={showToast} />
                            ))}
                            {paginatedResults.length === 0 && !loading && (
                                <div className="text-center py-20 text-zinc-500 font-medium bg-zinc-950 rounded-lg border border-zinc-800">No results found matching your filters.</div>
@@ -1257,8 +1735,8 @@ function SearchScreen({ category, setCategory, store }: { category: Category, se
   );
 }
 
-const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () => void, store: ReturnType<typeof useStore> }> = ({ rawReport, category, onClick, store }) => {
-    const { saveReport, savedReports, folders } = store;
+const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () => void, store: ReturnType<typeof useStore>, showToast?: (msg: string, type?: 'success' | 'info' | 'remove') => void }> = ({ rawReport, category, onClick, store, showToast }) => {
+    const { saveReport, removeReport, savedReports, folders } = store;
     const parsed = parseReport(category, rawReport);
     const [justSaved, setJustSaved] = useState(false);
 
@@ -1271,17 +1749,24 @@ const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () =>
         : null;
 
     const handleSave = () => {
-        saveReport({
-            id: parsed.id,
-            category,
-            title: parsed.title,
-            summary: parsed.description.substring(0, 200),
-            rawData: rawReport,
-            notes: '',
-            folderId: null
-        });
-        setJustSaved(true);
-        setTimeout(() => setJustSaved(false), 2000);
+        if (existingSave) {
+            // Already saved → remove it
+            removeReport(parsed.id);
+            showToast?.(`"${parsed.title}" removed from saved`, 'remove');
+        } else {
+            saveReport({
+                id: parsed.id,
+                category,
+                title: parsed.title,
+                summary: parsed.description.substring(0, 200),
+                rawData: rawReport,
+                notes: '',
+                folderId: null
+            });
+            setJustSaved(true);
+            setTimeout(() => setJustSaved(false), 2000);
+            showToast?.(`"${parsed.title}" saved`, 'success');
+        }
     };
 
     return (
@@ -1302,22 +1787,94 @@ const ReportCard: React.FC<{ rawReport: any, category: Category, onClick?: () =>
                </div>
 
                <button
-                   onClick={(e) => { e.stopPropagation(); handleSave(); }}
-                   className={cn(
-                       "flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-colors shrink-0",
-                       justSaved || existingSave
-                           ? "bg-emerald-950 text-emerald-400 border border-emerald-900"
-                           : "bg-zinc-950 border border-zinc-800 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
-                   )}
-               >
-                   <Bookmark className={cn("w-3.5 h-3.5", (justSaved || existingSave) && "fill-current")} />
-                   {justSaved ? 'Saved!' : existingSave ? '✓' : 'Save'}
-               </button>
+                    onClick={(e) => { e.stopPropagation(); handleSave(); }}
+                    className={cn(
+                        "flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-colors shrink-0",
+                        justSaved
+                            ? "bg-emerald-950 text-emerald-400 border border-emerald-900"
+                            : existingSave
+                            ? "bg-zinc-900 text-zinc-400 border border-zinc-700 hover:bg-red-950 hover:text-red-300 hover:border-red-900"
+                            : "bg-zinc-950 border border-zinc-800 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
+                    )}
+                >
+                    {justSaved
+                      ? <><Bookmark className="w-3.5 h-3.5 fill-current" /> Saved!</>
+                      : existingSave
+                      ? <><BookmarkMinus className="w-3.5 h-3.5" /> Remove</>
+                      : <><Bookmark className="w-3.5 h-3.5" /> Save</>
+                    }
+                </button>
             </div>
 
             <p className="text-zinc-400 mb-4 line-clamp-2 leading-relaxed text-sm">
                 {parsed.description}
             </p>
+
+            {/* Category-specific metadata row */}
+            {category === 'drug' && (() => {
+              const serious = rawReport.serious === '1';
+              const fatal = rawReport.seriousnessdeath === '1';
+              const hospitalized = rawReport.seriousnesshospitalization === '1';
+              const lifeThreat = rawReport.seriousnesslifethreatening === '1';
+              const sexCode = rawReport.patient?.patientsex;
+              const sex = sexCode === '1' ? 'M' : sexCode === '2' ? 'F' : null;
+              const country = rawReport.primarysourcecountry || rawReport.occurcountry;
+              const allDrugs: string[] = (rawReport.patient?.drug || []).map((d: any) =>
+                Array.isArray(d.openfda?.brand_name) ? d.openfda.brand_name[0] : d.medicinalproduct
+              ).filter(Boolean);
+              const ageGroupMap: Record<string, string> = { '1': 'Neonate', '2': 'Infant', '3': 'Child', '4': 'Adolescent', '5': 'Adult', '6': 'Elderly' };
+              const ageGroup = ageGroupMap[rawReport.patient?.patientagegroup];
+              return (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {fatal && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-950 border border-red-800 text-red-300">☠ Fatal</span>}
+                  {!fatal && lifeThreat && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-950 border border-orange-800 text-orange-300">⚡ Life-threatening</span>}
+                  {!fatal && !lifeThreat && hospitalized && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-950 border border-rose-800 text-rose-300">🏥 Hospitalized</span>}
+                  {!fatal && !lifeThreat && !hospitalized && serious && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950 border border-amber-800 text-amber-300">⚠ Serious</span>}
+                  {sex && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-700 text-zinc-400">{sex}</span>}
+                  {ageGroup && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-700 text-zinc-400">{ageGroup}</span>}
+                  {country && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-700 text-zinc-400">{country}</span>}
+                  {allDrugs.length > 1 && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-950 border border-indigo-800 text-indigo-400">{allDrugs.length} drugs</span>}
+                </div>
+              );
+            })()}
+            {category === 'food' && (() => {
+              const outcomes: string[] = rawReport.outcomes || [];
+              const industryNames = [...new Set((rawReport.products || []).map((p: any) => p.industry_name).filter(Boolean))] as string[];
+              const gender = rawReport.consumer?.gender;
+              const age = rawReport.consumer?.age ? `${rawReport.consumer.age} ${rawReport.consumer.age_unit || 'yr'}` : null;
+              const outcomeColor = (o: string) => {
+                const l = o.toLowerCase();
+                return l.includes('death') ? 'bg-red-950 border-red-800 text-red-300' :
+                       l.includes('life threat') ? 'bg-orange-950 border-orange-800 text-orange-300' :
+                       l.includes('hospital') ? 'bg-rose-950 border-rose-800 text-rose-300' :
+                       l.includes('emergency') ? 'bg-amber-950 border-amber-800 text-amber-300' :
+                       'bg-zinc-900 border-zinc-700 text-zinc-400';
+              };
+              return (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {outcomes.slice(0,3).map((o, i) => (
+                    <span key={i} className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${outcomeColor(o)}`}>{o}</span>
+                  ))}
+                  {industryNames[0] && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-950 border border-indigo-800 text-indigo-400">{industryNames[0]}</span>}
+                  {age && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-700 text-zinc-400">Age: {age}</span>}
+                  {gender && gender !== 'Not Available' && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-700 text-zinc-400">{gender}</span>}
+                </div>
+              );
+            })()}
+            {category === 'tobacco' && (() => {
+              const nonuser = rawReport.nonuser_affected === 'Yes';
+              const tobProducts: string[] = rawReport.tobacco_products || [];
+              const numProblems: number = rawReport.number_health_problems ?? 0;
+              return (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {nonuser && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950 border border-amber-800 text-amber-300">⚠ Non-user affected</span>}
+                  {tobProducts.slice(0,3).map((p, i) => (
+                    <span key={i} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-700 text-zinc-400">{p}</span>
+                  ))}
+                  {numProblems > 0 && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-700 text-zinc-400">{numProblems} health {numProblems === 1 ? 'problem' : 'problems'}</span>}
+                </div>
+              );
+            })()}
 
             <div className="flex flex-wrap gap-1.5">
                 {parsed.events.slice(0, 5).map((e, idx) => (
@@ -2294,51 +2851,134 @@ function RecallsView({
   );
 }
 
-function HistoryScreen({ store }: { store: ReturnType<typeof useStore> }) {
-    const { searchHistory, clearSearchHistory } = store;
+const HISTORY_CAT_COLORS: Record<string, string> = {
+  device: 'bg-blue-950 border-blue-800 text-blue-300',
+  drug:   'bg-violet-950 border-violet-800 text-violet-300',
+  food:   'bg-green-950 border-green-800 text-green-300',
+  tobacco:'bg-amber-950 border-amber-800 text-amber-300',
+};
 
-    return (
-        <div className="p-8">
-            <div className="flex justify-between items-center mb-8">
-                <h2 className="text-3xl font-bold tracking-tight text-zinc-100 flex items-center gap-3">
-                    <History className="w-8 h-8 text-zinc-100" />
-                    Search Database History
-                </h2>
-                {searchHistory.length > 0 && (
-                    <button
-                        onClick={clearSearchHistory}
-                        className="px-4 py-2 border border-zinc-800 text-red-400 rounded-lg hover:bg-red-950 hover:border-red-900 text-sm font-semibold transition-colors flex items-center gap-2"
-                    >
-                        <AlertTriangle className="w-4 h-4" /> Clear History
-                    </button>
-                )}
-            </div>
-
-            {searchHistory.length === 0 ? (
-                <div className="flex flex-col items-center justify-center p-16 text-center text-zinc-500">
-                     <History className="w-16 h-16 mb-4 opacity-20" />
-                     <p className="text-lg">No search history available.</p>
-                     <p className="text-sm mt-1">Your recent searches will appear here.</p>
-                </div>
-            ) : (
-                <div className="bg-zinc-950 border border-zinc-800 rounded-xl shadow-sm overflow-hidden">
-                    <div className="divide-y divide-zinc-100">
-                        {searchHistory.map((item, idx) => (
-                            <div key={idx} className="p-4 hover:bg-zinc-950 flex items-center justify-between transition-colors">
-                                <div className="flex flex-col gap-1">
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-xs font-bold text-zinc-100 uppercase tracking-widest">{item.category}</span>
-                                        <span className="text-xs text-zinc-500">· {new Date(item.timestamp).toLocaleString()}</span>
-                                    </div>
-                                    <span className="text-lg font-medium text-zinc-50">"{item.query}"</span>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
+function HistoryItemRow({ item, isSaved, onReplay, onRemove }: {
+  item: import('./types').SearchHistoryItem;
+  isSaved: boolean;
+  onReplay: (item: import('./types').SearchHistoryItem) => void;
+  onRemove: (id: string) => void;
+  key?: React.Key;
+}) {
+  const queries = item.queries?.length ? item.queries : [item.query];
+  return (
+    <div className={cn(
+      'group p-4 flex items-start gap-4 transition-colors',
+      isSaved ? 'hover:bg-amber-950/20' : 'hover:bg-zinc-900/50'
+    )}>
+      <div className={cn('mt-0.5 shrink-0 w-8 h-8 rounded-lg flex items-center justify-center', isSaved ? 'bg-amber-950 border border-amber-800' : 'bg-zinc-900 border border-zinc-800')}>
+        {isSaved ? <Bookmark className="w-4 h-4 text-amber-400" /> : <History className="w-4 h-4 text-zinc-500" />}
+      </div>
+      <div className="flex-1 min-w-0 space-y-1.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={cn('text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border', HISTORY_CAT_COLORS[item.category] ?? 'bg-zinc-800 border-zinc-700 text-zinc-400')}>
+            {item.category}
+          </span>
+          {isSaved && item.savedLabel && (
+            <span className="text-sm font-semibold text-amber-300">{item.savedLabel}</span>
+          )}
+          <span className="text-xs text-zinc-600 ml-auto shrink-0">
+            {new Date(item.timestamp).toLocaleDateString(undefined, { year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })}
+          </span>
         </div>
-    );
+        <div className="flex flex-wrap gap-1.5">
+          {queries.map((q, i) => (
+            <span key={i} className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-zinc-800 border border-zinc-700 text-zinc-200">
+              <Search className="w-2.5 h-2.5 opacity-50" />{q}
+            </span>
+          ))}
+        </div>
+        {(item.filters?.startDate || item.filters?.endDate) && (
+          <div className="flex items-center gap-1.5 text-[10px] text-violet-400">
+            <Calendar className="w-3 h-3" />
+            {item.filters.startDate || '…'} → {item.filters.endDate || '…'}
+          </div>
+        )}
+      </div>
+      <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button
+          onClick={() => onReplay(item)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-colors"
+        >↻ Replay</button>
+        <button
+          onClick={() => onRemove(item.id)}
+          className="p-1.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-950 transition-colors"
+          title="Remove"
+        ><X className="w-3.5 h-3.5" /></button>
+      </div>
+    </div>
+  );
+}
+
+function HistoryScreen({ store, onReplay }: {
+  store: ReturnType<typeof useStore>;
+  onReplay: (item: import('./types').SearchHistoryItem) => void;
+}) {
+  const { searchHistory, clearSearchHistory, removeHistoryItem } = store;
+
+  const savedQueries = searchHistory.filter(h => h.saved);
+  const recentHistory = searchHistory.filter(h => !h.saved);
+
+  return (
+    <div className="p-8 space-y-8 max-w-4xl mx-auto">
+      {/* Header */}
+      <div className="flex justify-between items-center">
+        <h2 className="text-3xl font-bold tracking-tight text-zinc-100 flex items-center gap-3">
+          <History className="w-8 h-8 text-zinc-100" />
+          Search History
+        </h2>
+        {recentHistory.length > 0 && (
+          <button
+            onClick={clearSearchHistory}
+            className="px-4 py-2 border border-zinc-800 text-red-400 rounded-lg hover:bg-red-950 hover:border-red-900 text-sm font-semibold transition-colors flex items-center gap-2"
+          >
+            <AlertTriangle className="w-4 h-4" /> Clear History
+          </button>
+        )}
+      </div>
+
+      {/* Saved Queries */}
+      {savedQueries.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Bookmark className="w-4 h-4 text-amber-400" />
+            <h3 className="text-sm font-bold text-amber-400 uppercase tracking-wider">Saved Searches</h3>
+            <span className="text-[10px] font-bold bg-amber-950 border border-amber-800 text-amber-400 px-1.5 py-0.5 rounded-full">{savedQueries.length}</span>
+          </div>
+          <div className="bg-zinc-950 border border-amber-900/40 rounded-xl overflow-hidden divide-y divide-zinc-800/50">
+            {savedQueries.map(item => <HistoryItemRow key={item.id} item={item} isSaved={true} onReplay={onReplay} onRemove={removeHistoryItem} />)}
+          </div>
+        </div>
+      )}
+
+      {/* Recent History */}
+      <div>
+        {savedQueries.length > 0 && (
+          <div className="flex items-center gap-2 mb-3">
+            <Clock className="w-4 h-4 text-zinc-500" />
+            <h3 className="text-sm font-bold text-zinc-500 uppercase tracking-wider">Recent Searches</h3>
+            <span className="text-[10px] font-bold bg-zinc-800 border border-zinc-700 text-zinc-400 px-1.5 py-0.5 rounded-full">{recentHistory.length}</span>
+          </div>
+        )}
+        {recentHistory.length === 0 ? (
+          <div className="flex flex-col items-center justify-center p-16 text-center text-zinc-500">
+            <History className="w-16 h-16 mb-4 opacity-20" />
+            <p className="text-lg">No search history yet.</p>
+            <p className="text-sm mt-1">Your searches will appear here.</p>
+          </div>
+        ) : (
+          <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden divide-y divide-zinc-800/50">
+            {recentHistory.map(item => <HistoryItemRow key={item.id} item={item} isSaved={false} onReplay={onReplay} onRemove={removeHistoryItem} />)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // 3-state filter chip group with search bar and Select All
@@ -2627,8 +3267,18 @@ function QuickFilterBar({
   const unique = (arr: (string | undefined | null)[]) =>
     Array.from(new Set(arr.filter(Boolean) as string[])).sort();
 
-  const manufacturerOpts = unique(results.map(r => r.device?.[0]?.manufacturer_d_name));
-  const deviceNameOpts   = unique(results.map(r => r.device?.[0]?.generic_name));
+  const manufacturerOpts = category === 'drug'
+    ? unique(results.flatMap(r => (r.patient?.drug || []).flatMap((d: any) => Array.isArray(d.openfda?.manufacturer_name) ? d.openfda.manufacturer_name : [])))
+    : category === 'food'
+    ? unique(results.flatMap(r => (r.products || []).map((p: any) => p.industry_name)))
+    : unique(results.map(r => r.device?.[0]?.manufacturer_d_name));
+  const deviceNameOpts = category === 'drug'
+    ? unique(results.flatMap(r => (r.patient?.drug || []).map((d: any) => Array.isArray(d.openfda?.brand_name) ? d.openfda.brand_name[0] : d.medicinalproduct).filter(Boolean)))
+    : category === 'food'
+    ? unique(results.flatMap(r => (r.products || []).map((p: any) => p.name_brand)))
+    : category === 'tobacco'
+    ? unique(results.flatMap(r => r.tobacco_products || []))
+    : unique(results.map(r => r.device?.[0]?.generic_name));
   const patientProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.patientProblems ?? []) as string[]; }));
   const productProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.deviceProblems ?? []) as string[]; }));
 
@@ -2702,12 +3352,16 @@ function QuickFilterBar({
   };
 
   interface QuickFilterConfig { id: string; label: string; count: number; }
+  const manufacturerLabel = category === 'food' ? 'Industry' : category === 'drug' ? 'Manufacturer' : 'Manufacturer';
+  const deviceNameLabel = category === 'drug' ? 'Drug' : category === 'food' ? 'Product' : category === 'tobacco' ? 'Product' : 'Device Type';
+  const productProblemsLabel = category === 'drug' ? 'Seriousness' : category === 'food' ? 'Outcomes' : category === 'tobacco' ? 'Health Problems' : 'Product Problems';
+  const patientProblemsLabel = category === 'drug' ? 'Reactions' : category === 'food' ? 'Reactions' : category === 'tobacco' ? 'Health Problems' : 'Patient Problems';
   const quickFilters: QuickFilterConfig[] = [
-    { id: 'date',            label: 'Date',             count: dateActive },
-    { id: 'manufacturers',   label: 'Manufacturer',     count: countDim(filters.manufacturers) },
-    { id: 'productProblems', label: 'Product Problems', count: countDim(filters.productProblems) },
-    { id: 'patientProblems', label: 'Patient Problems', count: countDim(filters.patientProblems) },
-    { id: 'deviceNames',     label: 'Device Type',      count: countDim(filters.deviceNames) },
+    { id: 'date',            label: 'Date',                  count: dateActive },
+    { id: 'manufacturers',   label: manufacturerLabel,        count: countDim(filters.manufacturers) },
+    { id: 'productProblems', label: productProblemsLabel,     count: countDim(filters.productProblems) },
+    { id: 'patientProblems', label: patientProblemsLabel,     count: countDim(filters.patientProblems) },
+    { id: 'deviceNames',     label: deviceNameLabel,          count: countDim(filters.deviceNames) },
   ];
 
   // All active chips for removal row
@@ -2868,11 +3522,35 @@ function FiltersModal({
         Array.from(new Set(arr.filter(Boolean) as string[])).sort();
 
     const eventTypeOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return p.events; }));
-    const manufacturerOpts = unique(results.map(r => r.device?.[0]?.manufacturer_d_name));
-    const deviceNameOpts = unique(results.map(r => r.device?.[0]?.generic_name));
-    const eventLocationOpts = unique(results.map(r => r.event_location));
-    const reportSourceOpts = unique(results.map(r => r.report_source_code));
-    const reporterStateOpts = unique(results.map(r => r.reporter_state_code));
+    const manufacturerOpts = category === 'drug'
+      ? unique(results.flatMap(r => (r.patient?.drug || []).flatMap((d: any) => Array.isArray(d.openfda?.manufacturer_name) ? d.openfda.manufacturer_name : [])))
+      : category === 'food'
+      ? unique(results.flatMap(r => (r.products || []).map((p: any) => p.industry_name)))
+      : unique(results.map(r => r.device?.[0]?.manufacturer_d_name));
+    const deviceNameOpts = category === 'drug'
+      ? unique(results.flatMap(r => (r.patient?.drug || []).map((d: any) => Array.isArray(d.openfda?.brand_name) ? d.openfda.brand_name[0] : d.medicinalproduct).filter(Boolean)))
+      : category === 'food'
+      ? unique(results.flatMap(r => (r.products || []).map((p: any) => p.name_brand)))
+      : category === 'tobacco'
+      ? unique(results.flatMap(r => r.tobacco_products || []))
+      : unique(results.map(r => r.device?.[0]?.generic_name));
+    const eventLocationOpts = category === 'drug'
+      ? unique(results.map(r => r.primarysourcecountry || r.occurcountry))
+      : category === 'food' || category === 'tobacco'
+      ? []
+      : unique(results.map(r => r.event_location));
+    const reportSourceOpts = category === 'drug'
+      ? unique(results.map(r => { const qualMap: Record<string, string> = { '1': 'Physician', '2': 'Pharmacist', '3': 'Health Professional', '4': 'Lawyer', '5': 'Consumer' }; return qualMap[r.primarysource?.qualification] || r.primarysource?.qualification || ''; }))
+      : category === 'food' || category === 'tobacco'
+      ? []
+      : unique(results.map(r => r.report_source_code));
+    const reporterStateOpts = category === 'drug'
+      ? unique(results.map(r => r.serious === '1' ? 'Serious' : 'Non-serious'))
+      : category === 'tobacco'
+      ? unique(results.map(r => r.nonuser_affected === 'Yes' ? 'Yes' : 'No'))
+      : category === 'food'
+      ? []
+      : unique(results.map(r => r.reporter_state_code));
     const sexOpts = unique(results.map(r => { const p = parseReport(category, r); return p.patient?.sex; }));
 
     const EMPTY_FILTERS = {
@@ -3003,40 +3681,64 @@ function FiltersModal({
 
                     <div className="border-t border-zinc-800" />
 
-                    <FilterDimGroup label="Event Type" options={eventTypeOpts} dim={filters.eventTypes}
+                    <FilterDimGroup label={category === 'drug' ? 'Reaction (MedDRA)' : category === 'food' || category === 'tobacco' ? 'Reactions / Health Problems' : 'Event Type'} options={eventTypeOpts} dim={filters.eventTypes}
                         onChange={d => setFilters({ ...filters, eventTypes: d })} />
                     <div className="border-t border-zinc-800/50" />
-                    <FilterDimGroup label="Patient Sex" options={sexOpts} dim={filters.sexes}
-                        onChange={d => setFilters({ ...filters, sexes: d })} />
-                    <div className="border-t border-zinc-800/50" />
+                    {category !== 'tobacco' && (
+                      <>
+                        <FilterDimGroup label="Patient Sex" options={sexOpts} dim={filters.sexes}
+                            onChange={d => setFilters({ ...filters, sexes: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                      </>
+                    )}
                     {patientProblemOpts.length > 0 && (
                         <>
-                        <FilterDimGroup label="Patient Problems" options={patientProblemOpts} dim={filters.patientProblems}
+                        <FilterDimGroup label={category === 'drug' ? 'Reactions' : category === 'food' ? 'Reactions' : category === 'tobacco' ? 'Health Problems' : 'Patient Problems'} options={patientProblemOpts} dim={filters.patientProblems}
                             onChange={d => setFilters({ ...filters, patientProblems: d })} />
                         <div className="border-t border-zinc-800/50" />
                         </>
                     )}
                     {productProblemOpts.length > 0 && (
                         <>
-                        <FilterDimGroup label="Product Problems" options={productProblemOpts} dim={filters.productProblems}
+                        <FilterDimGroup label={category === 'drug' ? 'Seriousness' : category === 'food' ? 'Outcomes' : category === 'tobacco' ? 'Products' : 'Product Problems'} options={productProblemOpts} dim={filters.productProblems}
                             onChange={d => setFilters({ ...filters, productProblems: d })} />
                         <div className="border-t border-zinc-800/50" />
                         </>
                     )}
-                    <FilterDimGroup label="Manufacturer" options={manufacturerOpts} dim={filters.manufacturers}
-                        onChange={d => setFilters({ ...filters, manufacturers: d })} />
-                    <div className="border-t border-zinc-800/50" />
-                    <FilterDimGroup label="Device Type" options={deviceNameOpts} dim={filters.deviceNames}
-                        onChange={d => setFilters({ ...filters, deviceNames: d })} />
-                    <div className="border-t border-zinc-800/50" />
-                    <FilterDimGroup label="Event Location" options={eventLocationOpts} dim={filters.eventLocations}
-                        onChange={d => setFilters({ ...filters, eventLocations: d })} />
-                    <div className="border-t border-zinc-800/50" />
-                    <FilterDimGroup label="Report Source" options={reportSourceOpts} dim={filters.reportSources}
-                        onChange={d => setFilters({ ...filters, reportSources: d })} />
-                    <div className="border-t border-zinc-800/50" />
-                    <FilterDimGroup label="Reporter State" options={reporterStateOpts} dim={filters.reporterStates}
-                        onChange={d => setFilters({ ...filters, reporterStates: d })} />
+                    {manufacturerOpts.length > 0 && (
+                      <>
+                        <FilterDimGroup label={category === 'food' ? 'Industry / Category' : 'Manufacturer'} options={manufacturerOpts} dim={filters.manufacturers}
+                            onChange={d => setFilters({ ...filters, manufacturers: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                      </>
+                    )}
+                    {deviceNameOpts.length > 0 && (
+                      <>
+                        <FilterDimGroup label={category === 'drug' ? 'Drug / Brand Name' : category === 'food' ? 'Brand Name' : category === 'tobacco' ? 'Product Type' : 'Device Type'} options={deviceNameOpts} dim={filters.deviceNames}
+                            onChange={d => setFilters({ ...filters, deviceNames: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                      </>
+                    )}
+                    {eventLocationOpts.length > 0 && (
+                      <>
+                        <FilterDimGroup label={category === 'drug' ? 'Country' : 'Event Location'} options={eventLocationOpts} dim={filters.eventLocations}
+                            onChange={d => setFilters({ ...filters, eventLocations: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                      </>
+                    )}
+                    {reportSourceOpts.length > 0 && (
+                      <>
+                        <FilterDimGroup label={category === 'drug' ? 'Reporter Qualification' : 'Report Source'} options={reportSourceOpts} dim={filters.reportSources}
+                            onChange={d => setFilters({ ...filters, reportSources: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                      </>
+                    )}
+                    {reporterStateOpts.length > 0 && (
+                      <>
+                        <FilterDimGroup label={category === 'drug' ? 'Seriousness' : category === 'tobacco' ? 'Non-user Affected' : 'Reporter State'} options={reporterStateOpts} dim={filters.reporterStates}
+                            onChange={d => setFilters({ ...filters, reporterStates: d })} />
+                      </>
+                    )}
                 </div>
 
                 {/* Footer */}
