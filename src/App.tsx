@@ -19,6 +19,10 @@ import AuthModal from './components/AuthModal';
 import OnboardingFlow from './components/OnboardingFlow';
 import ProfileModal from './components/ProfileModal';
 import { useAuth } from './hooks/useAuth';
+import AdminDashboard from './components/AdminDashboard';
+import { useAdmin } from './hooks/useAdmin';
+import { ShieldCheck } from 'lucide-react';
+
 
 // ── Toast system ─────────────────────────────────────────────────────────────
 type ToastItem = { id: string; message: string; type: 'success' | 'info' | 'remove' };
@@ -70,8 +74,9 @@ export default function App() {
   } = useAuth();
   const store = useStore(user?.uid ?? null);
   const { toasts, show: showToast, dismiss: dismissToast } = useToast();
+  const { isAdmin, adminLoading } = useAdmin(user);
 
-  const [activeTab, setActiveTab] = useState<'search' | 'history' | 'saved'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'history' | 'saved' | 'admin'>('search');
   const [pendingReplay, setPendingReplay] = React.useState<import('./types').SearchHistoryItem | null>(null);
   const [searchCategory, setSearchCategory] = useState<Category>('device');
   const [isDbsOpen, setIsDbsOpen] = useState(true);
@@ -87,8 +92,8 @@ export default function App() {
 
   const isDemoMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('demo') === '1';
 
-  // Show splash for unauthenticated users
-  if (!isDemoMode && authLoading) {
+  // Show splash for unauthenticated users or during profile fetch
+  if (!isDemoMode && (authLoading || (user && profileLoading && !profile))) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
@@ -213,6 +218,25 @@ export default function App() {
                 {isSidebarOpen && "Saved Reports"}
             </button>
           </div>
+
+          {/* Section 4: Admin Portal */}
+          {isAdmin && (
+            <div className="w-full">
+              {isSidebarOpen && <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-widest px-2 mb-2">Management</h3>}
+              <button
+                  onClick={() => setActiveTab('admin')}
+                  title="Admin Dashboard"
+                  className={cn(
+                    "flex items-center rounded text-sm transition-all",
+                    isSidebarOpen ? "px-3 py-2 w-full gap-3" : "justify-center w-10 h-10 px-0 mx-auto",
+                    activeTab === 'admin' ? "bg-zinc-900 text-zinc-100 font-semibold border-zinc-800" : "text-zinc-400 hover:bg-zinc-950 hover:text-zinc-200"
+                  )}
+              >
+                  <ShieldCheck className={cn("w-4 h-4 shrink-0 text-zinc-500", activeTab === 'admin' && "text-zinc-300")} />
+                  {isSidebarOpen && "Admin Dashboard"}
+              </button>
+            </div>
+          )}
         </nav>
 
         {/* User account section at bottom of sidebar */}
@@ -304,6 +328,7 @@ export default function App() {
              setPendingReplay(item);
            }} />}
            {activeTab === 'saved' && <SavedScreen store={store} />}
+           {activeTab === 'admin' && isAdmin && <AdminDashboard />}
         </div>
       </main>
      </div>
@@ -327,19 +352,149 @@ export default function App() {
 
 
 
+// ── exportChart utility to copy/download chart as image ──────────────────────
+async function exportChart({
+  title,
+  subtitle,
+  visibleData,
+  barHue,
+  action,
+  showToast
+}: {
+  title: string;
+  subtitle: string;
+  visibleData: { term: string; count: number }[];
+  barHue: number;
+  action: 'copy' | 'download';
+  showToast?: (message: string, type?: 'success' | 'info' | 'remove') => void;
+}) {
+  try {
+    const DPR       = 2;
+    const BAR_H     = 26;
+    const BAR_GAP   = 10;
+    const LABEL_W   = 190;
+    const VAL_W     = 46;
+    const PAD       = { t: 64, r: 24, b: 24, l: 20 };
+    const BAR_AREA  = 340;
+    const maxCount  = Math.max(...visibleData.map(d => d.count), 1);
+
+    const W = PAD.l + LABEL_W + BAR_AREA + VAL_W + PAD.r;
+    const H = PAD.t + visibleData.length * (BAR_H + BAR_GAP) - BAR_GAP + PAD.b;
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = W * DPR;
+    canvas.height = H * DPR;
+    const ctx = canvas.getContext('2d')!;
+    ctx.scale(DPR, DPR);
+
+    // Background
+    ctx.fillStyle = '#09090b';
+    ctx.fillRect(0, 0, W, H);
+
+    // Border
+    ctx.strokeStyle = '#27272a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+
+    // Title
+    ctx.font = `bold 14px system-ui,-apple-system,BlinkMacSystemFont,sans-serif`;
+    ctx.fillStyle = '#fafafa';
+    ctx.textAlign = 'left';
+    ctx.fillText(title, PAD.l + 4, 26);
+
+    // Subtitle
+    ctx.font = '11px system-ui,-apple-system,BlinkMacSystemFont,sans-serif';
+    ctx.fillStyle = '#a1a1aa';
+    ctx.fillText(subtitle, PAD.l + 4, 44);
+
+    const xBar = PAD.l + LABEL_W;
+
+    // Draw axis line
+    ctx.strokeStyle = '#3f3f46';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(xBar, PAD.t - 6);
+    ctx.lineTo(xBar, PAD.t + visibleData.length * (BAR_H + BAR_GAP) - BAR_GAP + 6);
+    ctx.stroke();
+
+    visibleData.forEach((item, i) => {
+      const y   = PAD.t + i * (BAR_H + BAR_GAP);
+      const barW = Math.max(4, (item.count / maxCount) * BAR_AREA);
+      const mid  = y + BAR_H / 2 + 4;
+
+      // Label
+      ctx.font = '11px system-ui,-apple-system,BlinkMacSystemFont,sans-serif';
+      ctx.fillStyle = '#d4d4d8';
+      ctx.textAlign = 'right';
+      const label = item.term.length > 28 ? item.term.slice(0, 27) + '…' : item.term;
+      ctx.fillText(label, xBar - 10, mid);
+
+      // Bar
+      const r = Math.min(3, BAR_H / 2);
+      ctx.fillStyle = `hsl(${barHue}, 70%, ${45 + (i * 2)}%)`;
+      ctx.beginPath();
+      ctx.moveTo(xBar, y);
+      ctx.lineTo(xBar + barW - r, y);
+      ctx.arcTo(xBar + barW, y, xBar + barW, y + r, r);
+      ctx.arcTo(xBar + barW, y + BAR_H, xBar + barW - r, y + BAR_H, r);
+      ctx.lineTo(xBar, y + BAR_H);
+      ctx.closePath();
+      ctx.fill();
+
+      // Value
+      ctx.font = 'bold 11px system-ui,-apple-system,BlinkMacSystemFont,sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'left';
+      ctx.fillText(String(item.count), xBar + barW + 8, mid);
+    });
+
+    const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/png'));
+    if (!blob) throw new Error('canvas.toBlob returned null');
+
+    if (action === 'copy') {
+      if (navigator.clipboard && window.ClipboardItem) {
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': blob })
+        ]);
+        showToast?.('Chart copied to clipboard!', 'success');
+      } else {
+        throw new Error('ClipboardItem API not supported');
+      }
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${title.replace(/[^a-z0-9]/gi, '_')}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      showToast?.('Chart downloaded as PNG!', 'success');
+    }
+  } catch (e) {
+    console.error('Export failed:', e);
+    showToast?.('Failed to export chart', 'remove');
+    throw e;
+  }
+}
+
 // ── SimpleFilterChart — gear-filterable bar chart for Analytics tab ──────────
 function SimpleFilterChart({
-  title, icon, data, barHue, layout,
+  title, icon, data, barHue, layout, totalReports, showToast
 }: {
   title: string;
   icon: React.ReactNode;
   data: { term: string; count: number }[];
   barHue: number;
   layout: 'vertical' | 'horizontal';
+  totalReports?: number;
+  showToast?: (message: string, type?: 'success' | 'info' | 'remove') => void;
 }) {
   const [showSettings, setShowSettings] = React.useState(false);
   const [hidden, setHidden] = React.useState<Set<string>>(new Set());
   const [limit, setLimit] = React.useState(20);
+  const [copied, setCopied] = React.useState(false);
+  const [downloaded, setDownloaded] = React.useState(false);
   const settingsRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -353,12 +508,82 @@ function SimpleFilterChart({
   }, [showSettings]);
 
   const visibleData = data.filter(d => !hidden.has(d.term)).slice(0, limit);
+  const total = totalReports ?? data.reduce((acc, d) => acc + d.count, 0);
 
   return (
     <div className="bg-zinc-950 p-4 rounded-lg shadow-sm border border-zinc-800">
       <div className="flex items-center gap-2 mb-4">
         {icon}
         <h3 className="text-sm font-bold text-zinc-100 flex-1">{title}</h3>
+        
+        {/* Quick limit toggle */}
+        <button
+          onClick={() => setLimit(prev => (prev === Infinity ? 20 : Infinity))}
+          className="px-2 py-1 rounded border border-zinc-800 text-[10px] font-bold text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-all"
+        >
+          {limit === Infinity ? 'Show Top 20' : 'Show All'}
+        </button>
+
+        {/* Copy */}
+        <button
+          onClick={async () => {
+            setCopied(true);
+            try {
+              await exportChart({
+                title,
+                subtitle: `${limit === Infinity ? 'all' : `top ${visibleData.length}`} · ${total} reports`,
+                visibleData,
+                barHue,
+                action: 'copy',
+                showToast
+              });
+            } catch (e) {
+              setCopied(false);
+            } finally {
+              setTimeout(() => setCopied(false), 2000);
+            }
+          }}
+          title="Copy chart to clipboard"
+          className={cn(
+            'p-1.5 rounded-md border text-xs font-bold transition-all',
+            copied
+              ? 'bg-emerald-950 border-emerald-900 text-emerald-400'
+              : 'border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
+          )}
+        >
+          {copied ? '✓' : <Copy className="w-3.5 h-3.5" />}
+        </button>
+
+        {/* Download */}
+        <button
+          onClick={async () => {
+            setDownloaded(true);
+            try {
+              await exportChart({
+                title,
+                subtitle: `${limit === Infinity ? 'all' : `top ${visibleData.length}`} · ${total} reports`,
+                visibleData,
+                barHue,
+                action: 'download',
+                showToast
+              });
+            } catch (e) {
+              setDownloaded(false);
+            } finally {
+              setTimeout(() => setDownloaded(false), 2000);
+            }
+          }}
+          title="Download chart as PNG"
+          className={cn(
+            'p-1.5 rounded-md border text-xs font-bold transition-all',
+            downloaded
+              ? 'bg-emerald-900 border-emerald-750 text-emerald-450'
+              : 'border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
+          )}
+        >
+          {downloaded ? '✓' : <Download className="w-3.5 h-3.5" />}
+        </button>
+
         <div className="relative" ref={settingsRef}>
           <button
             onClick={() => setShowSettings(s => !s)}
@@ -383,9 +608,9 @@ function SimpleFilterChart({
                       {n}
                     </button>
                   ))}
-                  <button onClick={() => setLimit(Infinity as unknown as number)}
+                  <button onClick={() => setLimit(Infinity)}
                     className={cn('px-2.5 py-1 text-xs rounded border transition-colors',
-                      limit === (Infinity as unknown as number) ? 'bg-blue-600 border-blue-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500')}>
+                      limit === Infinity ? 'bg-blue-600 border-blue-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500')}>
                     All
                   </button>
                 </div>
@@ -422,30 +647,32 @@ function SimpleFilterChart({
           )}
         </div>
       </div>
-      <div className="h-64">
-        <ResponsiveContainer width="100%" height="100%">
-          {layout === 'vertical' ? (
-            <BarChart data={visibleData} layout="vertical" margin={{ left: 10, right: 30, top: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#27272a" />
-              <XAxis type="number" tick={{ fontSize: 11, fill: '#a1a1aa' }} />
-              <YAxis dataKey="term" type="category" width={150} tick={{ fontSize: 10, fill: '#a1a1aa' }} />
-              <Tooltip contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }} />
-              <Bar dataKey="count" radius={[0, 2, 2, 0]}>
-                {visibleData.map((_, i) => <Cell key={i} fill={`hsl(${barHue}, 82%, ${48 + i * 2}%)`} />)}
-              </Bar>
-            </BarChart>
-          ) : (
-            <BarChart data={visibleData} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#27272a" />
-              <XAxis dataKey="term" tick={{ fontSize: 10, fill: '#a1a1aa' }} />
-              <YAxis tick={{ fontSize: 10, fill: '#a1a1aa' }} />
-              <Tooltip contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }} />
-              <Bar dataKey="count" radius={[2, 2, 0, 0]}>
-                {visibleData.map((_, i) => <Cell key={i} fill={`hsl(${barHue}, 70%, ${45 + i}%)`} />)}
-              </Bar>
-            </BarChart>
-          )}
-        </ResponsiveContainer>
+      <div className={cn('h-64', layout === 'vertical' && 'overflow-y-auto')}>
+        <div style={layout === 'vertical' && (limit === Infinity || visibleData.length > 10) ? { height: `${visibleData.length * 28 + 40}px` } : { height: '100%' }}>
+          <ResponsiveContainer width="100%" height="100%">
+            {layout === 'vertical' ? (
+              <BarChart data={visibleData} layout="vertical" margin={{ left: 10, right: 30, top: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#27272a" />
+                <XAxis type="number" tick={{ fontSize: 11, fill: '#a1a1aa' }} />
+                <YAxis dataKey="term" type="category" width={150} tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+                <Tooltip contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }} />
+                <Bar dataKey="count" radius={[0, 2, 2, 0]}>
+                  {visibleData.map((_, i) => <Cell key={i} fill={`hsl(${barHue}, 82%, ${48 + i * 2}%)`} />)}
+                </Bar>
+              </BarChart>
+            ) : (
+              <BarChart data={visibleData} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#27272a" />
+                <XAxis dataKey="term" tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+                <YAxis tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+                <Tooltip contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }} />
+                <Bar dataKey="count" radius={[2, 2, 0, 0]}>
+                  {visibleData.map((_, i) => <Cell key={i} fill={`hsl(${barHue}, 70%, ${45 + i}%)`} />)}
+                </Bar>
+              </BarChart>
+            )}
+          </ResponsiveContainer>
+        </div>
       </div>
     </div>
   );
@@ -453,7 +680,7 @@ function SimpleFilterChart({
 
 // ── ProblemBarChart ────────────────────────────────────────────────────────────
 function ProblemBarChart({
-  title, data, totalReports, barHue, dotColor, onBarClick,
+  title, data, totalReports, barHue, dotColor, onBarClick, showToast
 }: {
   title: string;
   data: { term: string; count: number }[];
@@ -461,11 +688,13 @@ function ProblemBarChart({
   barHue: number;
   dotColor: string;
   onBarClick?: (term: string) => void;
+  showToast?: (message: string, type?: 'success' | 'info' | 'remove') => void;
 }) {
   const [showSettings, setShowSettings] = React.useState(false);
   const [hidden, setHidden] = React.useState<Set<string>>(new Set());
   const [limit, setLimit] = React.useState<number>(10);
   const [copied, setCopied] = React.useState(false);
+  const [downloaded, setDownloaded] = React.useState(false);
   const chartRef = React.useRef<HTMLDivElement>(null);
   const settingsRef = React.useRef<HTMLDivElement>(null);
 
@@ -481,94 +710,6 @@ function ProblemBarChart({
 
   const visibleData = data.filter(d => !hidden.has(d.term)).slice(0, limit);
 
-  const copyAsImage = async () => {
-    setCopied(true);
-    try {
-      const DPR       = 2;
-      const BAR_H     = 26;
-      const BAR_GAP   = 10;
-      const LABEL_W   = 190;
-      const VAL_W     = 46;
-      const PAD       = { t: 58, r: 24, b: 24, l: 20 };
-      const BAR_AREA  = 340;
-      const maxCount  = Math.max(...visibleData.map(d => d.count), 1);
-
-      const W = PAD.l + LABEL_W + BAR_AREA + VAL_W + PAD.r;
-      const H = PAD.t + visibleData.length * (BAR_H + BAR_GAP) - BAR_GAP + PAD.b;
-
-      const canvas = document.createElement('canvas');
-      canvas.width  = W * DPR;
-      canvas.height = H * DPR;
-      const ctx = canvas.getContext('2d')!;
-      ctx.scale(DPR, DPR);
-
-      ctx.font = `bold 14px system-ui,sans-serif`;
-      ctx.fillStyle = '#111827';
-      ctx.textAlign = 'left';
-      ctx.fillText(title, PAD.l, 22);
-
-      ctx.font = '11px system-ui,sans-serif';
-      ctx.fillStyle = '#6b7280';
-      ctx.fillText(
-        `${limit === Infinity ? 'all' : `top ${visibleData.length}`} · ${totalReports} reports`,
-        PAD.l, 40,
-      );
-
-      const xBar = PAD.l + LABEL_W;
-
-      ctx.strokeStyle = '#d1d5db';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(xBar, PAD.t - 6);
-      ctx.lineTo(xBar, PAD.t + visibleData.length * (BAR_H + BAR_GAP));
-      ctx.stroke();
-
-      visibleData.forEach((item, i) => {
-        const y   = PAD.t + i * (BAR_H + BAR_GAP);
-        const barW = Math.max(4, (item.count / maxCount) * BAR_AREA);
-        const mid  = y + BAR_H / 2 + 4;
-
-        ctx.font = '11px system-ui,sans-serif';
-        ctx.fillStyle = '#374151';
-        ctx.textAlign = 'right';
-        const label = item.term.length > 28 ? item.term.slice(0, 27) + '…' : item.term;
-        ctx.fillText(label, xBar - 8, mid);
-
-        const r = Math.min(3, BAR_H / 2);
-        ctx.fillStyle = `hsl(${barHue}, 82%, ${48 + i * 2}%)`;
-        ctx.beginPath();
-        ctx.moveTo(xBar, y);
-        ctx.lineTo(xBar + barW - r, y);
-        ctx.arcTo(xBar + barW, y, xBar + barW, y + r, r);
-        ctx.arcTo(xBar + barW, y + BAR_H, xBar + barW - r, y + BAR_H, r);
-        ctx.lineTo(xBar, y + BAR_H);
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.font = 'bold 11px system-ui,sans-serif';
-        ctx.fillStyle = '#374151';
-        ctx.textAlign = 'left';
-        ctx.fillText(String(item.count), xBar + barW + 6, mid);
-      });
-
-      const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/png'));
-      if (!blob) throw new Error('canvas.toBlob returned null');
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${title.replace(/[^a-z0-9]/gi, '_')}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-    } catch (e) {
-      console.error('Chart copy failed:', e);
-      setCopied(false);
-    } finally {
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
   return (
     <div className="bg-zinc-950 p-4 rounded-lg shadow-sm border border-zinc-800">
       {/* Header */}
@@ -577,12 +718,75 @@ function ProblemBarChart({
         <h3 className="text-sm font-bold text-zinc-100 flex-1">{title}</h3>
         {onBarClick && <span className="text-[10px] text-zinc-600 italic">click bar to filter</span>}
         <span className="text-[10px] text-zinc-600">from {totalReports} reports</span>
-        {/* Download */}
-        <button onClick={copyAsImage} title="Download as PNG"
-          className={cn('p-1.5 rounded-md border text-xs font-bold transition-all',
-            copied ? 'bg-emerald-900 border-emerald-700 text-emerald-300' : 'border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800')}>
-          {copied ? '✓' : <Download className="w-3.5 h-3.5" />}
+        
+        {/* Quick limit toggle */}
+        <button
+          onClick={() => setLimit(prev => (prev === Infinity ? 10 : Infinity))}
+          className="px-2 py-1 rounded border border-zinc-800 text-[10px] font-bold text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-all"
+        >
+          {limit === Infinity ? 'Show Top 10' : 'Show All'}
         </button>
+
+        {/* Copy */}
+        <button
+          onClick={async () => {
+            setCopied(true);
+            try {
+              await exportChart({
+                title,
+                subtitle: `${limit === Infinity ? 'all' : `top ${visibleData.length}`} · ${totalReports} reports`,
+                visibleData,
+                barHue,
+                action: 'copy',
+                showToast
+              });
+            } catch (e) {
+              setCopied(false);
+            } finally {
+              setTimeout(() => setCopied(false), 2000);
+            }
+          }}
+          title="Copy chart to clipboard"
+          className={cn(
+            'p-1.5 rounded-md border text-xs font-bold transition-all',
+            copied
+              ? 'bg-emerald-950 border-emerald-900 text-emerald-400'
+              : 'border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
+          )}
+        >
+          {copied ? '✓' : <Copy className="w-3.5 h-3.5" />}
+        </button>
+
+        {/* Download */}
+        <button
+          onClick={async () => {
+            setDownloaded(true);
+            try {
+              await exportChart({
+                title,
+                subtitle: `${limit === Infinity ? 'all' : `top ${visibleData.length}`} · ${totalReports} reports`,
+                visibleData,
+                barHue,
+                action: 'download',
+                showToast
+              });
+            } catch (e) {
+              setDownloaded(false);
+            } finally {
+              setTimeout(() => setDownloaded(false), 2000);
+            }
+          }}
+          title="Download chart as PNG"
+          className={cn(
+            'p-1.5 rounded-md border text-xs font-bold transition-all',
+            downloaded
+              ? 'bg-emerald-900 border-emerald-700 text-emerald-300'
+              : 'border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
+          )}
+        >
+          {downloaded ? '✓' : <Download className="w-3.5 h-3.5" />}
+        </button>
+
         {/* Gear */}
         <div className="relative" ref={settingsRef}>
           <button onClick={() => setShowSettings(s => !s)} title="Chart settings"
@@ -646,30 +850,32 @@ function ProblemBarChart({
         </div>
       </div>
       {/* Chart */}
-      <div className={cn('h-72', onBarClick && 'cursor-pointer')} ref={chartRef}>
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={visibleData} layout="vertical" margin={{ left: 10, right: 40, top: 0, bottom: 0 }}
-            onClick={onBarClick ? (chartData: any) => {
-              if (chartData?.activePayload?.[0]?.payload?.term)
-                onBarClick(chartData.activePayload[0].payload.term);
-            } : undefined}
-          >
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#27272a" />
-            <XAxis type="number" tick={{ fontSize: 11, fill: '#a1a1aa' }} />
-            <YAxis dataKey="term" type="category" width={170} tick={{ fontSize: 10, fill: '#a1a1aa' }} />
-            <Tooltip
-              contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }}
-              formatter={(value: any, _name: any, props: any) =>
-                onBarClick ? [`${value} reports — click to filter`, ''] : [value, '']
-              }
-            />
-            <Bar dataKey="count" radius={[0, 3, 3, 0]}>
-              {visibleData.map((_, i) => (
-                <Cell key={i} fill={`hsl(${barHue}, 82%, ${48 + i * 2}%)`} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+      <div className={cn('h-72 overflow-y-auto', onBarClick && 'cursor-pointer')} ref={chartRef}>
+        <div style={{ height: limit === Infinity || visibleData.length > 10 ? `${visibleData.length * 28 + 40}px` : '100%' }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={visibleData} layout="vertical" margin={{ left: 10, right: 40, top: 0, bottom: 0 }}
+              onClick={onBarClick ? (chartData: any) => {
+                if (chartData?.activePayload?.[0]?.payload?.term)
+                  onBarClick(chartData.activePayload[0].payload.term);
+              } : undefined}
+            >
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#27272a" />
+              <XAxis type="number" tick={{ fontSize: 11, fill: '#a1a1aa' }} />
+              <YAxis dataKey="term" type="category" width={170} tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+              <Tooltip
+                contentStyle={{ borderRadius: '6px', backgroundColor: '#09090b', border: '1px solid #27272a', fontSize: '12px', color: '#fafaed' }}
+                formatter={(value: any, _name: any, props: any) =>
+                  onBarClick ? [`${value} reports — click to filter`, ''] : [value, '']
+                }
+              />
+              <Bar dataKey="count" radius={[0, 3, 3, 0]}>
+                {visibleData.map((_, i) => (
+                  <Cell key={i} fill={`hsl(${barHue}, 82%, ${48 + i * 2}%)`} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
       </div>
     </div>
   );

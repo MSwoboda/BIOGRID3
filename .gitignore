@@ -13,3 +13,7 @@ agent/__pycache__/
 **/__pycache__/
 *.py[cod]
 *.pyo
+
+# Firebase Service Account
+scripts/service-account.json
+

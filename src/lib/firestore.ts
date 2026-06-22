@@ -19,6 +19,7 @@ export interface UserProfile {
   marketingConsent: boolean;
   createdAt: number;
   updatedAt?: number;
+  paused?: boolean;
 }
 
 // Named database created in the biogrid-app project
@@ -99,12 +100,64 @@ export async function deleteMfrGroupDoc(uid: string, id: string) {
 
 // ── User Profile helpers ───────────────────────────────────────────────────────
 const profileDoc = (uid: string) => doc(db, 'users', uid, 'profile', 'data');
+// Top-level denormalised index for admin dashboard (no subcollection traversal needed)
+const userIndexDoc = (uid: string) => doc(db, 'userIndex', uid);
 
-export async function saveUserProfile(uid: string, profile: UserProfile): Promise<void> {
-  await setDoc(profileDoc(uid), { ...profile, updatedAt: Date.now() });
+export async function saveUserProfile(uid: string, profile: UserProfile, email?: string): Promise<void> {
+  const now = Date.now();
+  await setDoc(profileDoc(uid), { ...profile, updatedAt: now });
+  // Also write to userIndex so the admin dashboard can list all users efficiently.
+  // Rules: only the user themselves can write; only admins can read.
+  await setDoc(userIndexDoc(uid), {
+    uid,
+    email: email ?? '',
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    company: profile.company,
+    role: profile.role,
+    createdAt: profile.createdAt,
+    updatedAt: now,
+    paused: profile.paused ?? false,
+  });
 }
 
 export async function loadUserProfile(uid: string): Promise<UserProfile | null> {
   const snap = await getDoc(profileDoc(uid));
   return snap.exists() ? (snap.data() as UserProfile) : null;
 }
+
+function getClientDetails() {
+  const ua = typeof window !== 'undefined' ? navigator.userAgent : '';
+  let browser = 'Unknown Browser';
+  let os = 'Unknown OS';
+
+  // Simple OS detection
+  if (/windows/i.test(ua)) os = 'Windows';
+  else if (/macintosh|mac os x/i.test(ua)) os = 'macOS';
+  else if (/android/i.test(ua)) os = 'Android';
+  else if (/iphone|ipad/i.test(ua)) os = 'iOS';
+  else if (/linux/i.test(ua)) os = 'Linux';
+
+  // Simple Browser detection
+  if (/chrome|crios/i.test(ua) && !/edge|edg/i.test(ua) && !/opr/i.test(ua)) browser = 'Chrome';
+  else if (/safari/i.test(ua) && !/chrome|crios/i.test(ua)) browser = 'Safari';
+  else if (/firefox|fxios/i.test(ua)) browser = 'Firefox';
+  else if (/edge|edg/i.test(ua)) browser = 'Edge';
+  else if (/opr/i.test(ua)) browser = 'Opera';
+
+  return { browser, os, userAgent: ua };
+}
+
+export async function recordLoginHistory(uid: string): Promise<void> {
+  const { browser, os, userAgent } = getClientDetails();
+  const loginRef = doc(collection(db, 'users', uid, 'loginHistory'));
+  await setDoc(loginRef, {
+    id: loginRef.id,
+    timestamp: Date.now(),
+    browser,
+    os,
+    userAgent,
+    localTime: new Date().toLocaleString(),
+  });
+}
+

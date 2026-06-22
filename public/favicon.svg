@@ -1,16 +1,35 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <!-- Dark background circle -->
-  <circle cx="16" cy="16" r="16" fill="#09090b"/>
-  <!-- Grid lines (the "grid" in BioGrid) -->
-  <line x1="8" y1="12" x2="24" y2="12" stroke="#27272a" stroke-width="1"/>
-  <line x1="8" y1="16" x2="24" y2="16" stroke="#27272a" stroke-width="1"/>
-  <line x1="8" y1="20" x2="24" y2="20" stroke="#27272a" stroke-width="1"/>
-  <line x1="12" y1="8" x2="12" y2="24" stroke="#27272a" stroke-width="1"/>
-  <line x1="16" y1="8" x2="16" y2="24" stroke="#27272a" stroke-width="1"/>
-  <line x1="20" y1="8" x2="20" y2="24" stroke="#27272a" stroke-width="1"/>
-  <!-- DNA / bar chart accent bars — teal/blue -->
-  <rect x="9" y="18" width="3" height="4" rx="0.5" fill="#0ea5e9" opacity="0.9"/>
-  <rect x="13" y="14" width="3" height="8" rx="0.5" fill="#38bdf8" opacity="0.9"/>
-  <rect x="17" y="11" width="3" height="11" rx="0.5" fill="#7dd3fc" opacity="0.9"/>
-  <rect x="21" y="16" width="3" height="6" rx="0.5" fill="#0ea5e9" opacity="0.9"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" shape-rendering="geometricPrecision">
+  <!-- White rounded-square background matching app logo style -->
+  <rect width="32" height="32" rx="6.5" fill="white"/>
+  <!--
+    "B" lettermark — hand-tuned path:
+    Stem on left, two bowls on right.
+    Proportions match a bold grotesque B (like Inter Black).
+  -->
+  <path
+    d="
+      M 8 7
+      L 8 25
+      L 18.2 25
+      C 21.6 25 23.8 23.3 23.8 20.5
+      C 23.8 18.6 22.7 17.2 21.0 16.5
+      C 22.3 15.8 23.0 14.6 23.0 13.0
+      C 23.0 10.1 21.0 7 17.4 7
+      Z
+      M 11.5 9.8
+      L 17.0 9.8
+      C 19.0 9.8 19.7 11.1 19.7 12.8
+      C 19.7 14.5 18.8 15.6 17.0 15.6
+      L 11.5 15.6
+      Z
+      M 11.5 18.2
+      L 17.8 18.2
+      C 19.9 18.2 20.3 19.6 20.3 20.8
+      C 20.3 22.2 19.5 22.4 17.8 22.4
+      L 11.5 22.4
+      Z
+    "
+    fill="#09090b"
+    fill-rule="evenodd"
+  />
 </svg>

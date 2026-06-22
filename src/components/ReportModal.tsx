@@ -72,6 +72,41 @@ function EmptyNote({ children }: { children?: React.ReactNode }) {
   );
 }
 
+// ── Geographic Locator Component ─────────────────────────────────────────────
+function GeographicLocator({ state, country }: { state?: string | null; country?: string | null }) {
+  const hasGeo = (state && state !== 'NA') || (country && country !== 'NA');
+  if (!hasGeo) return null;
+
+  return (
+    <div className="bg-zinc-900/40 border border-zinc-800/80 border-l-2 border-l-blue-500 rounded-xl p-4 flex items-center gap-4 relative overflow-hidden transition-all hover:border-zinc-700 hover:border-l-blue-500">
+      {/* Grid background effect */}
+      <div className="absolute inset-0 opacity-[0.03] pointer-events-none bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:14px_14px]" />
+      
+      {/* Compass / Radar Graphic */}
+      <div className="relative w-12 h-12 rounded-full border border-zinc-800 bg-zinc-950/90 flex items-center justify-center shrink-0">
+        <div className="absolute inset-1 rounded-full border border-dashed border-zinc-800 animate-[spin_20s_linear_infinite]" />
+        <div className="absolute w-2 h-2 rounded-full bg-blue-500 animate-ping opacity-75" />
+        <div className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+        {/* Radar sweep */}
+        <div className="absolute inset-0 rounded-full bg-gradient-to-tr from-transparent via-transparent to-blue-500/10 animate-[spin_4s_linear_infinite]" />
+      </div>
+
+      <div className="z-10 flex-1 min-w-0">
+        <dt className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-0.5 select-none">Report Location</dt>
+        <dd className="text-sm font-semibold text-zinc-100 flex items-center gap-1.5">
+          <span>{state ? `${state}, ` : ''}{country || 'United States'}</span>
+          {country && country.toUpperCase() !== 'US' && country.toUpperCase() !== 'USA' ? (
+            <span className="text-xs text-zinc-500 font-mono">({country})</span>
+          ) : (
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800/50">US Region</span>
+          )}
+        </dd>
+        <p className="text-[9px] text-zinc-600 font-mono mt-0.5 uppercase tracking-tight">Geo-coordinates: System Resolved</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Category-specific detail sections ────────────────────────────────────────
 
 function DrugDetail({ r }: { r: any }) {
@@ -112,7 +147,7 @@ function DrugDetail({ r }: { r: any }) {
       </div>
 
       {/* Patient Demographics */}
-      <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+      <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-rose-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-rose-500">
         <SectionTitle><Activity className="w-3.5 h-3.5 text-rose-400" /> Patient</SectionTitle>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3">
           <Field label="Sex" value={r.patient?.patientsex === '1' ? 'Male' : r.patient?.patientsex === '2' ? 'Female' : null} />
@@ -125,13 +160,16 @@ function DrugDetail({ r }: { r: any }) {
         </div>
       </div>
 
+      {/* Geographic Locator */}
+      <GeographicLocator country={r.primarysourcecountry || r.occurcountry} />
+
       {/* Reactions */}
       <div>
         <SectionTitle><span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> Reactions ({reactions.length})</SectionTitle>
         {reactions.length > 0 ? (
           <div className="space-y-1.5">
             {reactions.map((rxn: any, i: number) => (
-              <div key={i} className="flex items-center justify-between bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2">
+              <div key={i} className="flex items-center justify-between bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-rose-500/80 rounded-lg px-3 py-2 transition-colors hover:border-zinc-700 hover:border-l-rose-500">
                 <span className="text-sm text-zinc-200 font-medium">{rxn.reactionmeddrapt}</span>
                 {rxn.reactionoutcome && (
                   <Pill label={outcomeLabel(rxn.reactionoutcome)} color={outcomeColor(rxn.reactionoutcome)} />
@@ -154,7 +192,7 @@ function DrugDetail({ r }: { r: any }) {
             const pharmClass = Array.isArray(drug.openfda?.pharm_class_epc) ? drug.openfda.pharm_class_epc[0] : null;
             const route = Array.isArray(drug.openfda?.route) ? drug.openfda.route[0] : drug.drugadministrationroute;
             return (
-              <div key={i} className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+              <div key={i} className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-blue-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-blue-500">
                 <div className="flex items-start justify-between mb-3">
                   <div className="min-w-0">
                     <p className="text-sm font-bold text-zinc-100 capitalize">{brand || drug.medicinalproduct || 'Unknown'}</p>
@@ -180,7 +218,7 @@ function DrugDetail({ r }: { r: any }) {
 
       {/* Source */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+        <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-zinc-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-zinc-500">
           <SectionTitle>Report Details</SectionTitle>
           <dl className="space-y-2.5">
             <Field label="Safety Report ID" value={r.safetyreportid} mono />
@@ -189,7 +227,7 @@ function DrugDetail({ r }: { r: any }) {
             <Field label="Primary Source Country" value={r.primarysourcecountry} />
           </dl>
         </div>
-        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+        <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-zinc-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-zinc-500">
           <SectionTitle>Dates</SectionTitle>
           <dl className="space-y-2.5">
             <Field label="Received" value={r.receivedate} mono />
@@ -225,7 +263,7 @@ function FoodDetail({ r }: { r: any }) {
       )}
 
       {/* Consumer */}
-      <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+      <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-emerald-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-emerald-500">
         <SectionTitle><Activity className="w-3.5 h-3.5 text-rose-400" /> Consumer</SectionTitle>
         <div className="grid grid-cols-3 gap-x-6 gap-y-3">
           <Field label="Gender" value={r.consumer?.gender !== 'Not Available' ? r.consumer?.gender : null} />
@@ -241,7 +279,7 @@ function FoodDetail({ r }: { r: any }) {
         <SectionTitle><Apple className="w-3.5 h-3.5 text-emerald-400" /> Products ({products.length})</SectionTitle>
         <div className="space-y-2">
           {products.map((p: any, i: number) => (
-            <div key={i} className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+            <div key={i} className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-indigo-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-indigo-500">
               <div className="flex items-start justify-between mb-3">
                 <div>
                   <p className="text-sm font-bold text-zinc-100">{p.name_brand || 'Unknown Brand'}</p>
@@ -280,15 +318,15 @@ function TobaccoDetail({ r }: { r: any }) {
     <div className="space-y-5">
       {/* Summary stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4 text-center">
+        <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-amber-500 rounded-xl p-4 text-center">
           <p className="text-2xl font-bold text-zinc-100">{r.number_tobacco_products ?? products.length}</p>
           <p className="text-xs text-zinc-500 mt-1">Products</p>
         </div>
-        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4 text-center">
+        <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-rose-500 rounded-xl p-4 text-center">
           <p className="text-2xl font-bold text-zinc-100">{r.number_health_problems ?? problems.length}</p>
           <p className="text-xs text-zinc-500 mt-1">Health Problems</p>
         </div>
-        <div className={cn('border rounded-xl p-4 text-center', nonuser ? 'bg-amber-950/40 border-amber-800' : 'bg-zinc-900/50 border-zinc-800')}>
+        <div className={cn('border border-l-2 rounded-xl p-4 text-center', nonuser ? 'bg-amber-950/40 border-amber-800 border-l-amber-500' : 'bg-zinc-900/50 border-zinc-800 border-l-zinc-500')}>
           <p className={cn('text-2xl font-bold', nonuser ? 'text-amber-300' : 'text-zinc-100')}>{nonuser ? 'Yes' : 'No'}</p>
           <p className={cn('text-xs mt-1', nonuser ? 'text-amber-500' : 'text-zinc-500')}>Non-user Affected</p>
         </div>
@@ -310,7 +348,7 @@ function TobaccoDetail({ r }: { r: any }) {
         {problems.length > 0 ? (
           <div className="space-y-1.5">
             {problems.map((p, i) => (
-              <div key={i} className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2">
+              <div key={i} className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-rose-500/80 rounded-lg px-3 py-2 transition-colors hover:border-zinc-700 hover:border-l-rose-500">
                 <span className="text-sm text-zinc-200">{p}</span>
               </div>
             ))}
@@ -319,7 +357,7 @@ function TobaccoDetail({ r }: { r: any }) {
       </div>
 
       {/* Report details */}
-      <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+      <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-zinc-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-zinc-500">
         <SectionTitle>Report Details</SectionTitle>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2">
           <Field label="Report ID" value={String(r.report_id ?? '')} mono />
@@ -544,7 +582,7 @@ export default function ReportModal({
           <>
             {/* Timeline */}
             {timeline.length > 0 && (
-              <div className="flex flex-wrap gap-x-5 gap-y-2 px-4 py-3 bg-zinc-900/50 rounded-xl border border-zinc-800/70">
+              <div className="flex flex-wrap gap-x-5 gap-y-2 px-4 py-3 bg-zinc-900/50 rounded-xl border border-zinc-800/70 border-l-2 border-l-zinc-500">
                 {timeline.map(t => (
                   <div key={t.label} className="flex items-center gap-2 text-xs">
                     <Clock className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
@@ -559,14 +597,14 @@ export default function ReportModal({
             <div>
               <SectionTitle empty={!narrativeText}>Description of Event or Problem</SectionTitle>
               {narrativeText ? (
-                <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl px-5 py-4 text-sm text-zinc-200 leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
+                <div className="bg-zinc-900/60 border border-zinc-800 border-l-2 border-l-blue-500 rounded-xl px-5 py-4 text-sm text-zinc-200 leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
                   {narrativeText}
                 </div>
               ) : (
                 <EmptyNote>No narrative provided</EmptyNote>
               )}
               {otherTexts.map((t, i) => (
-                <div key={i} className="mt-2 bg-zinc-900/40 border border-zinc-800/50 rounded-xl px-4 py-3">
+                <div key={i} className="mt-2 bg-zinc-900/40 border border-zinc-800/50 border-l-2 border-l-zinc-600 rounded-xl px-4 py-3">
                   <p className="text-[10px] font-bold text-zinc-600 uppercase tracking-wider mb-1">{t.text_type_code}</p>
                   <p className="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap max-h-32 overflow-y-auto">{t.text}</p>
                 </div>
@@ -582,7 +620,7 @@ export default function ReportModal({
                 </SectionTitle>
                 <div className="space-y-3">
                   {devices.map((dev, di) => (
-                    <div key={di} className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+                    <div key={di} className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-amber-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-amber-500">
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3 mb-3">
                         <Field label="Generic Name"    value={dev.generic_name} />
                         <Field label="Brand Name"      value={dev.brand_name} />
@@ -611,7 +649,7 @@ export default function ReportModal({
                         if (dev.device_evaluated_by_manufacturer)
                           pills.push({ label: `Eval: ${dev.device_evaluated_by_manufacturer}`, color: 'zinc' });
                         return pills.length > 0 ? (
-                          <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-zinc-800/50">
+                           <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-zinc-800/50">
                             {pills.map((p, i) => <React.Fragment key={i}><Pill label={p.label} color={p.color} /></React.Fragment>)}
                           </div>
                         ) : null;
@@ -664,8 +702,8 @@ export default function ReportModal({
                       || pat.patient_age || pat.patient_sex || pat.patient_weight;
 
                     return (
-                      <div key={pi} className={cn('border rounded-xl p-4',
-                        hasData ? 'bg-zinc-900/50 border-zinc-800' : 'bg-zinc-900/20 border-zinc-800/30 opacity-30'
+                      <div key={pi} className={cn('border border-l-2 rounded-xl p-4 transition-colors hover:border-zinc-700',
+                        hasData ? 'bg-zinc-900/50 border-zinc-800 border-l-rose-500 hover:border-l-rose-500' : 'bg-zinc-900/20 border-zinc-800/30 border-l-zinc-700 opacity-30 hover:border-l-zinc-700'
                       )}>
                         <div className="flex items-center gap-2 mb-3">
                           <span className="text-xs font-bold text-zinc-400">
@@ -727,8 +765,8 @@ export default function ReportModal({
 
             {/* Manufacturer & Reporter */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className={cn('border rounded-xl p-4',
-                mfr ? 'bg-zinc-900/50 border-zinc-800' : 'bg-zinc-900/20 border-zinc-800/30 opacity-25',
+              <div className={cn('border border-l-2 rounded-xl p-4 transition-colors hover:border-zinc-700',
+                mfr ? 'bg-zinc-900/50 border-zinc-800 border-l-zinc-600 hover:border-l-zinc-600' : 'bg-zinc-900/20 border-zinc-800/30 border-l-zinc-800 opacity-25 hover:border-l-zinc-800',
               )}>
                 <SectionTitle empty={!mfr}>Manufacturer</SectionTitle>
                 <dl className="space-y-2.5">
@@ -737,7 +775,7 @@ export default function ReportModal({
                   <Field label="Contact" value={r.manufacturer_contact_t_name || null} />
                 </dl>
               </div>
-              <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+              <div className="bg-zinc-900/50 border border-zinc-800 border-l-2 border-l-blue-500 rounded-xl p-4 transition-colors hover:border-zinc-700 hover:border-l-blue-500">
                 <SectionTitle>Reporter</SectionTitle>
                 <dl className="space-y-2.5">
                   <Field label="Event Location"  value={r.event_location} />
@@ -748,6 +786,9 @@ export default function ReportModal({
                 </dl>
               </div>
             </div>
+
+            {/* Geographic Locator */}
+            <GeographicLocator state={r.reporter_state_code} country="United States" />
 
             {/* Report Classification */}
             {(() => {

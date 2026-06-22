@@ -13,7 +13,7 @@ import {
   signOut as fbSignOut,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
-import { loadUserProfile, saveUserProfile, UserProfile } from '../lib/firestore';
+import { loadUserProfile, saveUserProfile, UserProfile, recordLoginHistory } from '../lib/firestore';
 
 export type { UserProfile };
 
@@ -90,9 +90,26 @@ export function useAuth(): AuthState {
     }
     setProfileLoading(true);
     loadUserProfile(user.uid)
-      .then(p => {
+      .then(async p => {
+        if (p?.paused) {
+          await fbSignOut(auth);
+          setUser(null);
+          setProfile(null);
+          setNeedsOnboarding(false);
+          setAuthError('Your account has been suspended by an administrator. Please contact support.');
+          return;
+        }
         setProfile(p);
         setNeedsOnboarding(!p);
+
+        // Record login once per session
+        if (p) {
+          const sessionKey = `biogrid_login_${user.uid}_${p.updatedAt || 0}`;
+          if (!sessionStorage.getItem(sessionKey)) {
+            sessionStorage.setItem(sessionKey, '1');
+            recordLoginHistory(user.uid).catch(console.error);
+          }
+        }
       })
       .catch(() => setNeedsOnboarding(false))
       .finally(() => setProfileLoading(false));
@@ -167,7 +184,7 @@ export function useAuth(): AuthState {
 
   const saveProfile = useCallback(async (p: UserProfile) => {
     if (!user) throw new Error('Not signed in');
-    await saveUserProfile(user.uid, p);
+    await saveUserProfile(user.uid, p, user.email ?? undefined);
     setProfile(p);
     setNeedsOnboarding(false);
   }, [user]);
