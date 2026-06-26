@@ -9,7 +9,7 @@ import type { DeviceIdentifier } from './lib/api';
 import { useStore } from './store';
 import { cn, formatDate, generateId } from './lib/utils';
 
-import { Search, FolderOpen, PieChart, List as ListIcon, Download, Bookmark, AlertTriangle, Clock, Box, Activity, Apple, Cigarette, ChevronDown, ChevronRight, History, PanelLeftClose, PanelLeft, Filter, X, ChevronLeft, Share2, Copy, Settings, LogOut, Pencil, Users, CheckCheck, Plus, Calendar, CheckCircle2, BookmarkMinus } from 'lucide-react';
+import { Search, FolderOpen, PieChart, List as ListIcon, Download, Bookmark, AlertTriangle, Clock, Box, Activity, Apple, Cigarette, ChevronDown, ChevronRight, History, PanelLeftClose, PanelLeft, Filter, X, ChevronLeft, Share2, Copy, Settings, LogOut, Pencil, Users, CheckCheck, Plus, Calendar, CheckCircle2, BookmarkMinus, Sparkles } from 'lucide-react';
 
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import SavedScreen from './components/SavedScreen';
@@ -20,6 +20,8 @@ import OnboardingFlow from './components/OnboardingFlow';
 import ProfileModal from './components/ProfileModal';
 import { useAuth } from './hooks/useAuth';
 import AdminDashboard from './components/AdminDashboard';
+import AiInsightsView from './components/AiInsightsView';
+import type { ChatMessage } from './components/AiInsightsView';
 import { useAdmin } from './hooks/useAdmin';
 import { ShieldCheck } from 'lucide-react';
 
@@ -896,11 +898,14 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
   const [results, setResults] = useState<any[]>([]);
   const [typesData, setTypesData] = useState<CountResult[]>([]);
   const [timeData, setTimeData] = useState<CountResult[]>([]);
-  const [viewMode, setViewMode] = useState<'list' | 'graph' | 'recalls' | 'problems'>('list');
+  const [viewMode, setViewMode] = useState<'list' | 'graph' | 'recalls' | 'problems' | 'insights'>('list');
   const [recallResults, setRecallResults] = useState<any[]>([]);
   const [recallTimeData, setRecallTimeData] = useState<CountResult[]>([]);
   const [recallSearchMode, setRecallSearchMode] = useState<'query' | 'identifiers' | null>(null);
   const [deviceIdentifiers, setDeviceIdentifiers] = useState<DeviceIdentifier[]>([]);
+
+  // AI Insights chat state — lifted here so it persists across tab switches
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
   const [error, setError] = useState('');
   const [hasSearched, setHasSearched] = useState(false);
@@ -969,6 +974,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
     sexes: FilterDim;
     patientProblems: FilterDim;
     productProblems: FilterDim;
+    productCodes: FilterDim;
     searchField: string;
     startDate: string;
     endDate: string;
@@ -985,6 +991,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
     sexes: { ...EMPTY_DIM },
     patientProblems: { ...EMPTY_DIM },
     productProblems: { ...EMPTY_DIM },
+    productCodes: { ...EMPTY_DIM },
     searchField: 'auto',
     startDate: '',
     endDate: '',
@@ -1009,7 +1016,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
     categoryCache.current[prev] = {
       queries, inputValue, searchedQueries, results, typesData, timeData,
       viewMode, recallResults, recallTimeData, recallSearchMode, deviceIdentifiers, hasSearched, filters,
-      currentPage, queryFieldsUsed, error,
+      currentPage, queryFieldsUsed, error, chatMessages,
     };
 
     // Restore or reset for the category we're entering
@@ -1032,6 +1039,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
       setCurrentPage(saved.currentPage);
       setQueryFieldsUsed(saved.queryFieldsUsed);
       setError(saved.error);
+      setChatMessages(saved.chatMessages || []);
     } else {
       // Fresh slate for a category we've never visited
       setQueries([]);
@@ -1052,6 +1060,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
       setCurrentPage(1);
       setQueryFieldsUsed({});
       setError('');
+      setChatMessages([]);
     }
 
     prevCategory.current = category;
@@ -1071,6 +1080,80 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
       .filter(s => !queries.includes(s));
 
   // Commit the current inputValue as a pill
+  // Parse a query value to determine its modifier type
+  const queryModifier = (q: string): 'include' | 'exclude' | 'search' => {
+    if (q.startsWith('+')) return 'include';
+    if (q.startsWith('-')) return 'exclude';
+    return 'search';
+  };
+  const queryTerm = (q: string): string => {
+    const mod = queryModifier(q);
+    if (mod === 'search') return q;
+    // Strip +/- prefix, then strip any semantic code prefix (e.g., "pc:", "mfr:")
+    const raw = q.slice(1).trim();
+    const colonIdx = raw.indexOf(':');
+    if (colonIdx > 0 && colonIdx <= 5) return raw.slice(colonIdx + 1).trim();
+    return raw;
+  };
+
+  /** Semantic code mapping: short prefix → FiltersState key, per category */
+  type FilterDimKey = 'eventTypes' | 'manufacturers' | 'deviceNames' | 'eventLocations' |
+    'reportSources' | 'reporterStates' | 'sexes' | 'patientProblems' | 'productProblems' | 'productCodes';
+  type SemanticCodeDef = { dimKey: FilterDimKey; label: string; example: string };
+  const SEMANTIC_CODES_BY_CATEGORY: Record<Category, Record<string, SemanticCodeDef>> = {
+    device: {
+      pc:  { dimKey: 'productCodes',    label: 'Product Code',    example: 'LYU' },
+      mfr: { dimKey: 'manufacturers',   label: 'Manufacturer',    example: 'Medtronic' },
+      ev:  { dimKey: 'eventTypes',      label: 'Event Type',      example: 'Malfunction' },
+      dev: { dimKey: 'deviceNames',     label: 'Device Name',     example: 'Pump' },
+      loc: { dimKey: 'eventLocations',  label: 'Location',        example: 'US' },
+      src: { dimKey: 'reportSources',   label: 'Report Source',   example: 'Manufacturer' },
+      sex: { dimKey: 'sexes',           label: 'Sex',             example: 'Female' },
+      pp:  { dimKey: 'patientProblems', label: 'Patient Problem', example: 'Death' },
+      dp:  { dimKey: 'productProblems', label: 'Device Problem',  example: 'Failure' },
+    },
+    drug: {
+      drug: { dimKey: 'deviceNames',     label: 'Drug Name',           example: 'Metformin' },
+      mfr:  { dimKey: 'manufacturers',   label: 'Manufacturer',        example: 'Pfizer' },
+      rx:   { dimKey: 'patientProblems', label: 'Reaction',            example: 'Nausea' },
+      ev:   { dimKey: 'eventTypes',      label: 'Event Type',          example: 'Hospitalization' },
+      ind:  { dimKey: 'productProblems', label: 'Indication',          example: 'Pain' },
+      loc:  { dimKey: 'eventLocations',  label: 'Country',             example: 'US' },
+      src:  { dimKey: 'reportSources',   label: 'Reporter',            example: 'Physician' },
+      sex:  { dimKey: 'sexes',           label: 'Sex',                 example: 'Male' },
+      ser:  { dimKey: 'reporterStates',  label: 'Seriousness',         example: 'Serious' },
+    },
+    food: {
+      prod: { dimKey: 'deviceNames',     label: 'Product Name',   example: 'Protein Bar' },
+      ind:  { dimKey: 'manufacturers',   label: 'Industry',        example: 'Dietary Supplements' },
+      rx:   { dimKey: 'patientProblems', label: 'Reaction',        example: 'Diarrhea' },
+      out:  { dimKey: 'productProblems', label: 'Outcome',         example: 'Hospitalization' },
+      sex:  { dimKey: 'sexes',           label: 'Sex',             example: 'Female' },
+    },
+    tobacco: {
+      prod: { dimKey: 'deviceNames',     label: 'Product Type',     example: 'Cigarettes' },
+      hp:   { dimKey: 'productProblems', label: 'Health Problem',   example: 'Coughing' },
+      nu:   { dimKey: 'reporterStates',  label: 'Non-user Affected', example: 'Yes' },
+    },
+  };
+  const SEMANTIC_CODES = SEMANTIC_CODES_BY_CATEGORY[category];
+
+  /** Parse a +/- query for a semantic code prefix. Returns { code, dimKey, value } or null. */
+  const parseSemanticCode = (q: string): { code: string; dimKey: FilterDimKey; value: string; mode: 'include' | 'exclude' } | null => {
+    const mod = queryModifier(q);
+    if (mod === 'search') return null;
+    const raw = q.slice(1).trim();
+    const colonIdx = raw.indexOf(':');
+    if (colonIdx <= 0 || colonIdx > 5) return null;
+    const code = raw.slice(0, colonIdx).toLowerCase();
+    let value = raw.slice(colonIdx + 1).trim();
+    const mapping = SEMANTIC_CODES[code];
+    if (!mapping || !value) return null;
+    // Auto-capitalize product codes (all FDA product codes are uppercase)
+    if (code === 'pc') value = value.toUpperCase();
+    return { code, dimKey: mapping.dimKey, value, mode: mod };
+  };
+
   const commitInput = (): string[] => {
     const val = inputValue.trim();
     if (!val || queries.includes(val)) return queries;
@@ -1098,6 +1181,44 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
 
     if (effectiveQueries.length === 0) return;
 
+    // Separate: regular search queries, keyword modifiers, and semantic filter codes
+    const searchQueries = effectiveQueries.filter(q => queryModifier(q) === 'search');
+    const semanticFilters = effectiveQueries.map(q => parseSemanticCode(q)).filter(Boolean) as NonNullable<ReturnType<typeof parseSemanticCode>>[];
+    const plainModifiers = effectiveQueries.filter(q => queryModifier(q) !== 'search' && !parseSemanticCode(q));
+    const includeModifiers = plainModifiers.filter(q => queryModifier(q) === 'include').map(q => queryTerm(q)).filter(Boolean);
+    const excludeModifiers = plainModifiers.filter(q => queryModifier(q) === 'exclude').map(q => queryTerm(q)).filter(Boolean);
+
+    // Apply semantic filter codes to the correct FiltersState dimension
+    if (semanticFilters.length > 0) {
+      setFilters(prev => {
+        const next = { ...prev };
+        for (const sf of semanticFilters) {
+          const dim = next[sf.dimKey] as FilterDim;
+          if (sf.mode === 'include' && !dim.include.includes(sf.value)) {
+            next[sf.dimKey] = { ...dim, include: [...dim.include, sf.value] };
+          } else if (sf.mode === 'exclude' && !dim.exclude.includes(sf.value)) {
+            next[sf.dimKey] = { ...dim, exclude: [...dim.exclude, sf.value] };
+          }
+        }
+        return next;
+      });
+    }
+
+    // Apply plain modifier queries as keyword filters
+    if (includeModifiers.length > 0 || excludeModifiers.length > 0) {
+      setKeywordFilter(prev => ({
+        include: [...new Set([...prev.include, ...includeModifiers])],
+        exclude: [...new Set([...prev.exclude, ...excludeModifiers])],
+      }));
+    }
+
+    // If there are no actual search queries, just apply filters and return
+    if (searchQueries.length === 0) {
+      setSearchedQueries(effectiveQueries);
+      setHasSearched(true);
+      return;
+    }
+
     setSearchedQueries(effectiveQueries);
     setQueryFieldsUsed({});
     setShowSuggestions(false);
@@ -1120,7 +1241,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
       const seenIds = new Set<string>();
       let allResults: any[] = [];
       const limitToFetch = filters.limit === 'All' ? Infinity : (filters.limit as number);
-      const perQueryLimit = Math.ceil(limitToFetch === Infinity ? Infinity : limitToFetch / effectiveQueries.length);
+      const perQueryLimit = Math.ceil(limitToFetch === Infinity ? Infinity : limitToFetch / (searchQueries.length || 1));
 
       // Save combined history item once per search (not per query term)
       addSearchHistory(category, effectiveQueries, {
@@ -1130,7 +1251,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
         searchField: filters.searchField,
       });
 
-      for (const q of effectiveQueries) {
+      for (const q of searchQueries) {
         // --- Step 1: determine initial field group ---
         const manualField = filters.searchField !== 'auto' ? filters.searchField : null;
         let fieldKey = manualField ?? detectQueryFieldKey(category, q);
@@ -1265,6 +1386,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
       if (category === 'device') {
         if (!applyDim(filters.manufacturers, [r.device?.[0]?.manufacturer_d_name || ''])) return false;
         if (!applyDim(filters.deviceNames, [r.device?.[0]?.generic_name || ''])) return false;
+        if (!applyDim(filters.productCodes, [r.device?.[0]?.device_report_product_code || ''])) return false;
         if (!applyDim(filters.eventLocations, [r.event_location || ''])) return false;
         if (!applyDim(filters.reportSources, [r.report_source_code || ''])) return false;
         if (!applyDim(filters.reporterStates, [r.reporter_state_code || ''])) return false;
@@ -1441,18 +1563,33 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                 <Search className="w-5 h-5 text-zinc-500 shrink-0 self-center" />
 
                 {/* Pills */}
-                {queries.map((q, i) => (
-                    <span key={i} className="flex items-center gap-1.5 bg-zinc-700 text-zinc-100 text-sm font-medium pl-3 pr-2 py-1 rounded-full shrink-0">
-                        {q}
+                {queries.map((q, i) => {
+                    const mod = queryModifier(q);
+                    const pillClass = mod === 'include'
+                      ? 'bg-emerald-950 border border-emerald-700 text-emerald-300'
+                      : mod === 'exclude'
+                      ? 'bg-red-950 border border-red-700 text-red-300'
+                      : 'bg-zinc-700 text-zinc-100';
+                    const iconClass = mod === 'include'
+                      ? 'text-emerald-500 hover:text-emerald-200'
+                      : mod === 'exclude'
+                      ? 'text-red-500 hover:text-red-200'
+                      : 'text-zinc-400 hover:text-zinc-100';
+                    return (
+                    <span key={i} className={`flex items-center gap-1.5 text-sm font-medium pl-3 pr-2 py-1 rounded-full shrink-0 ${pillClass}`}>
+                        {mod === 'include' && <span className="text-[10px] font-bold">+</span>}
+                        {mod === 'exclude' && <span className="text-[10px] font-bold">−</span>}
+                        {queryTerm(q)}
                         <button
                             type="button"
                             onClick={e => { e.stopPropagation(); removeQuery(i); }}
-                            className="text-zinc-400 hover:text-zinc-100 transition-colors"
+                            className={`transition-colors ${iconClass}`}
                         >
                             <X className="w-3.5 h-3.5" />
                         </button>
                     </span>
-                ))}
+                    );
+                })}
 
                 {/* Text input */}
                 <input
@@ -1507,7 +1644,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                       const activeCount = [
                         filters.eventTypes, filters.manufacturers, filters.deviceNames,
                         filters.eventLocations, filters.reportSources, filters.reporterStates,
-                        filters.sexes, filters.patientProblems, filters.productProblems
+                        filters.sexes, filters.patientProblems, filters.productProblems, filters.productCodes
                       ].reduce((n, d) => n + d.include.length + d.exclude.length, 0)
                         + (filters.startDate ? 1 : 0) + (filters.endDate ? 1 : 0)
                         + (filters.searchField !== 'auto' ? 1 : 0);
@@ -1549,7 +1686,10 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
             <div className="w-3 h-3 border-l border-t border-zinc-700 bg-zinc-900 rotate-45 ml-6 -mb-1.5 relative z-10" />
             <div className="bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-xl shadow-2xl px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">
               {!inputValue.trim() && queries.length === 0 && (
-                <span className="text-zinc-500">Type a drug, device, food product or report ID to begin</span>
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-zinc-500">Type a drug, device, food product or report ID to begin</span>
+                  <span className="text-zinc-600 text-[10px]">Prefix with <kbd className="px-1 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-emerald-400 font-mono">+</kbd> to include or <kbd className="px-1 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-red-400 font-mono">-</kbd> to exclude from results</span>
+                </div>
               )}
               {inputValue.trim() && queries.length === 0 && (
                 <div className="flex flex-col gap-2">
@@ -1588,6 +1728,37 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
           </div>
         )}
 
+        {/* ── Modifier hints dropdown — when typing + or - ── */}
+        {inputFocused && (inputValue.startsWith('+') || inputValue.startsWith('-')) && !inputValue.includes(':') && (
+          <div className="absolute left-0 right-0 top-full mt-2 z-50 bg-zinc-900/98 backdrop-blur border border-zinc-700 rounded-xl shadow-2xl overflow-hidden max-w-md pointer-events-auto">
+            <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-zinc-600">No code = keyword filter</span>
+                <span className="text-[10px] text-zinc-700 mx-1.5">·</span>
+                <span className="text-[10px] text-zinc-600"><kbd className="px-1 py-0.5 rounded border border-emerald-800 bg-emerald-950/50 text-emerald-400 font-mono">+</kbd> include  <kbd className="px-1 py-0.5 rounded border border-red-800 bg-red-950/50 text-red-400 font-mono">-</kbd> exclude</span>
+              </div>
+              <span className="text-[10px] text-zinc-600">click or type code:</span>
+            </div>
+            <div className="max-h-52 overflow-y-auto">
+              {Object.entries(SEMANTIC_CODES).map(([code, { label, example }]) => {
+                const prefix = inputValue[0]; // + or -
+                return (
+                  <button
+                    key={code}
+                    type="button"
+                    onMouseDown={e => { e.preventDefault(); setInputValue(`${prefix}${code}:`); }}
+                    className="w-full text-left px-3 py-2 flex items-center gap-3 hover:bg-zinc-800 transition-colors border-b border-zinc-800/50 last:border-b-0"
+                  >
+                    <kbd className="px-1.5 py-0.5 rounded border border-cyan-800 bg-cyan-950/50 text-cyan-300 font-mono text-[11px] font-bold min-w-[36px] text-center">{code}:</kbd>
+                    <span className="text-zinc-300 text-xs font-medium">{label}</span>
+                    <span className="ml-auto text-[10px] text-zinc-600 font-mono">{prefix}{code}:{example}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         </div>
 
         {/* Controls Bar — shows below search when results present */}
@@ -1610,13 +1781,35 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                      {searchedQueries.map((q, i) => {
                        const qf = queryFieldsUsed[q];
                        const abbrev = qf ? qf.label.split(/[\s/]+/).map((w: string) => w[0]).join('').toUpperCase() : '';
+                       const mod = queryModifier(q);
+                       const sc = parseSemanticCode(q);
+                       const isModifier = mod !== 'search';
+                       const isInclude = mod === 'include';
                        return (
-                         <span key={i} className="inline-flex items-center gap-1 font-semibold rounded-full border px-2 py-0.5 shrink-0 max-w-[140px]"
-                           style={{ background: qf?.fallback ? 'rgba(234,179,8,0.1)' : 'rgba(63,63,70,0.6)', borderColor: qf?.fallback ? 'rgba(234,179,8,0.3)' : 'rgba(63,63,70,1)', color: qf?.fallback ? '#eab308' : '#e4e4e7' }}
+                         <span key={i} className={cn(
+                           "inline-flex items-center gap-1 font-semibold rounded-full border px-2 py-0.5 shrink-0 max-w-[180px]",
+                           sc ? (isInclude
+                             ? 'bg-cyan-950/60 border-cyan-800 text-cyan-300'
+                             : 'bg-orange-950/60 border-orange-800 text-orange-300')
+                           : isModifier ? (isInclude
+                             ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+                             : 'bg-red-950/60 border-red-800 text-red-300')
+                           : ''
+                         )}
+                           style={!isModifier ? { background: qf?.fallback ? 'rgba(234,179,8,0.1)' : 'rgba(63,63,70,0.6)', borderColor: qf?.fallback ? 'rgba(234,179,8,0.3)' : 'rgba(63,63,70,1)', color: qf?.fallback ? '#eab308' : '#e4e4e7' } : undefined}
                          >
-                           <Search className="w-2.5 h-2.5 opacity-60 shrink-0" />
-                           <span className="truncate">{q}</span>
-                           {qf && <span className="opacity-50 shrink-0 ml-0.5">{abbrev}{qf.fallback ? '\u26a1' : ''}</span>}
+                           {sc ? (
+                             <>
+                               <span className="text-[9px] uppercase opacity-70 shrink-0">{SEMANTIC_CODES[sc.code]?.label ?? sc.code}</span>
+                               <span className="truncate">{sc.value}</span>
+                             </>
+                           ) : (
+                             <>
+                               <Search className="w-2.5 h-2.5 opacity-60 shrink-0" />
+                               <span className="truncate">{q}</span>
+                               {qf && <span className="opacity-50 shrink-0 ml-0.5">{abbrev}{qf.fallback ? '\u26a1' : ''}</span>}
+                             </>
+                           )}
                          </span>
                        );
                      })}
@@ -1814,6 +2007,9 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                             <AlertTriangle className="w-4 h-4" /> Recalls
                         </button>
                     )}
+                    <button onClick={() => setViewMode('insights')} className={cn("flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all duration-200", viewMode === 'insights' ? 'bg-gradient-to-r from-violet-900/80 to-blue-900/80 text-violet-200 shadow-sm border border-violet-700/30' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50')}>
+                        <Sparkles className="w-4 h-4" /> AI Insights
+                    </button>
                 </div>
 
                {/* Keyword search + Quick filters — below tabs, above results */}
@@ -1929,6 +2125,16 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                      recallSearchMode={recallSearchMode}
                      searchQuery={searchedQueries[0] ?? ''}
                      loading={loading}
+                   />
+               )}
+               {viewMode === 'insights' && (
+                   <AiInsightsView
+                     results={filteredResults}
+                     category={category}
+                     onSelectReport={setSelectedReport}
+                     chatMessages={chatMessages}
+                     setChatMessages={setChatMessages}
+                     savedReportIds={new Set(store.savedReports.map(r => r.id))}
                    />
                )}
             </div>
@@ -3460,6 +3666,10 @@ function QuickFilterBar({
 }) {
   const [open, setOpen] = React.useState<string | null>(null);
   const barRef = React.useRef<HTMLDivElement>(null);
+  // Lifted search state for DimPopover — prevents reset on pill click
+  const [popoverSearch, setPopoverSearch] = React.useState<Record<string, string>>({});
+  const getPopoverSearch = (dimKey: string) => popoverSearch[dimKey] || '';
+  const setPopoverSearchFor = (dimKey: string, value: string) => setPopoverSearch(prev => ({ ...prev, [dimKey]: value }));
 
   // Close on outside click
   React.useEffect(() => {
@@ -3487,11 +3697,14 @@ function QuickFilterBar({
     : unique(results.map(r => r.device?.[0]?.generic_name));
   const patientProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.patientProblems ?? []) as string[]; }));
   const productProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.deviceProblems ?? []) as string[]; }));
+  const productCodeOpts = category === 'device'
+    ? unique(results.map(r => r.device?.[0]?.device_report_product_code))
+    : [];
 
   // Count active per section
   const countDim = (d: { include: string[]; exclude: string[] }) => d.include.length + d.exclude.length;
   const dateActive = (filters.startDate ? 1 : 0) + (filters.endDate ? 1 : 0);
-  const totalActive = countDim(filters.manufacturers) + countDim(filters.productProblems) + countDim(filters.patientProblems) + countDim(filters.deviceNames) + dateActive;
+  const totalActive = countDim(filters.manufacturers) + countDim(filters.productProblems) + countDim(filters.patientProblems) + countDim(filters.deviceNames) + countDim(filters.productCodes) + dateActive;
 
   type Dim = { include: string[]; exclude: string[] };
 
@@ -3504,11 +3717,10 @@ function QuickFilterBar({
   const stateOf = (dim: Dim, opt: string) =>
     dim.include.includes(opt) ? 'include' : dim.exclude.includes(opt) ? 'exclude' : 'neutral';
 
-  // Popover for a dimension
-  const DimPopover = ({ dimKey, opts, dim, accent = 'blue' }: {
-    dimKey: string; opts: string[]; dim: Dim; accent?: string;
-  }) => {
-    const [search, setSearch] = React.useState('');
+  // Popover for a dimension — render function (NOT a component) to preserve DOM/scroll across re-renders
+  const renderDimPopover = (dimKey: string, opts: string[], dim: Dim, accent = 'blue') => {
+    const search = getPopoverSearch(dimKey);
+    const setSearch = (v: string) => setPopoverSearchFor(dimKey, v);
     const filtered = opts.filter(o => o.toLowerCase().includes(search.toLowerCase()));
     const accentInclude = accent === 'blue' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-violet-600 border-violet-500 text-white';
     return (
@@ -3527,7 +3739,9 @@ function QuickFilterBar({
         )}
         <div className="flex items-center justify-between">
           <div className="flex gap-2">
-            <button onClick={() => setFilters({ ...filters, [dimKey]: { include: opts, exclude: [] } })} className="text-[10px] text-zinc-600 hover:text-zinc-300">Select all</button>
+            <button onClick={() => setFilters({ ...filters, [dimKey]: { include: [...new Set([...dim.include, ...filtered])], exclude: dim.exclude.filter(e => !filtered.includes(e)) } })} className="text-[10px] text-zinc-600 hover:text-zinc-300">
+              {search ? `Select visible (${filtered.length})` : 'Select all'}
+            </button>
             <span className="text-zinc-700">·</span>
             <button onClick={() => setFilters({ ...filters, [dimKey]: { include: [], exclude: [] } })} className="text-[10px] text-zinc-600 hover:text-zinc-300">Clear</button>
           </div>
@@ -3565,6 +3779,7 @@ function QuickFilterBar({
   const quickFilters: QuickFilterConfig[] = [
     { id: 'date',            label: 'Date',                  count: dateActive },
     { id: 'manufacturers',   label: manufacturerLabel,        count: countDim(filters.manufacturers) },
+    ...(productCodeOpts.length > 0 ? [{ id: 'productCodes', label: 'Product Code', count: countDim(filters.productCodes) }] : []),
     { id: 'productProblems', label: productProblemsLabel,     count: countDim(filters.productProblems) },
     { id: 'patientProblems', label: patientProblemsLabel,     count: countDim(filters.patientProblems) },
     { id: 'deviceNames',     label: deviceNameLabel,          count: countDim(filters.deviceNames) },
@@ -3572,7 +3787,7 @@ function QuickFilterBar({
 
   // All active chips for removal row
   const activeChips: { label: string; dimKey: string; value: string; type: 'include' | 'exclude' }[] = [
-    ...(['manufacturers', 'productProblems', 'patientProblems', 'deviceNames'] as const).flatMap(k =>
+    ...(['manufacturers', 'productCodes', 'productProblems', 'patientProblems', 'deviceNames'] as const).flatMap(k =>
       [
         ...filters[k].include.map((v: string) => ({ label: v, dimKey: k, value: v, type: 'include' as const })),
         ...filters[k].exclude.map((v: string) => ({ label: v, dimKey: k, value: v, type: 'exclude' as const })),
@@ -3650,13 +3865,15 @@ function QuickFilterBar({
                       </div>
                     </div>
                   ) : qf.id === 'manufacturers' ? (
-                    <DimPopover dimKey="manufacturers" opts={manufacturerOpts} dim={filters.manufacturers} />
+                    renderDimPopover('manufacturers', manufacturerOpts, filters.manufacturers)
+                  ) : qf.id === 'productCodes' ? (
+                    renderDimPopover('productCodes', productCodeOpts, filters.productCodes)
                   ) : qf.id === 'productProblems' ? (
-                    <DimPopover dimKey="productProblems" opts={productProblemOpts} dim={filters.productProblems} accent="violet" />
+                    renderDimPopover('productProblems', productProblemOpts, filters.productProblems, 'violet')
                   ) : qf.id === 'patientProblems' ? (
-                    <DimPopover dimKey="patientProblems" opts={patientProblemOpts} dim={filters.patientProblems} accent="violet" />
+                    renderDimPopover('patientProblems', patientProblemOpts, filters.patientProblems, 'violet')
                   ) : (
-                    <DimPopover dimKey="deviceNames" opts={deviceNameOpts} dim={filters.deviceNames} />
+                    renderDimPopover('deviceNames', deviceNameOpts, filters.deviceNames)
                   )}
                 </div>
               )}
@@ -3679,7 +3896,7 @@ function QuickFilterBar({
         {/* Clear all */}
         {totalActive > 0 && (
           <button
-            onClick={() => setFilters((f: any) => ({ ...f, manufacturers: { include:[], exclude:[] }, productProblems: { include:[], exclude:[] }, patientProblems: { include:[], exclude:[] }, deviceNames: { include:[], exclude:[] }, startDate: '', endDate: '' }))}
+            onClick={() => setFilters((f: any) => ({ ...f, manufacturers: { include:[], exclude:[] }, productCodes: { include:[], exclude:[] }, productProblems: { include:[], exclude:[] }, patientProblems: { include:[], exclude:[] }, deviceNames: { include:[], exclude:[] }, startDate: '', endDate: '' }))}
             className="text-[10px] text-zinc-700 hover:text-red-400 transition-colors ml-1"
             title="Clear quick filters"
           >
@@ -3769,6 +3986,7 @@ function FiltersModal({
         sexes: { include: [], exclude: [] },
         patientProblems: { include: [], exclude: [] },
         productProblems: { include: [], exclude: [] },
+        productCodes: { include: [], exclude: [] },
         searchField: 'auto',
         startDate: '', endDate: '', limit: 500,
     };
@@ -3778,8 +3996,11 @@ function FiltersModal({
 
     const patientProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.patientProblems ?? []) as string[]; }));
     const productProblemOpts = unique(results.flatMap(r => { const p = parseReport(category, r); return (p.deviceProblems ?? []) as string[]; }));
+    const productCodeOpts = category === 'device'
+      ? unique(results.map(r => r.device?.[0]?.device_report_product_code))
+      : [];
 
-    const dims = [filters.eventTypes, filters.manufacturers, filters.deviceNames, filters.eventLocations, filters.reportSources, filters.reporterStates, filters.sexes, filters.patientProblems, filters.productProblems];
+    const dims = [filters.eventTypes, filters.manufacturers, filters.deviceNames, filters.eventLocations, filters.reportSources, filters.reporterStates, filters.sexes, filters.patientProblems, filters.productProblems, filters.productCodes];
     const activeCount = dims.reduce((a: number, d: any) => a + d.include.length + d.exclude.length, 0)
         + (filters.startDate ? 1 : 0) + (filters.endDate ? 1 : 0) + (filters.limit !== 500 ? 1 : 0)
         + (filters.searchField !== 'auto' ? 1 : 0);
@@ -3922,6 +4143,13 @@ function FiltersModal({
                       <>
                         <FilterDimGroup label={category === 'drug' ? 'Drug / Brand Name' : category === 'food' ? 'Brand Name' : category === 'tobacco' ? 'Product Type' : 'Device Type'} options={deviceNameOpts} dim={filters.deviceNames}
                             onChange={d => setFilters({ ...filters, deviceNames: d })} />
+                        <div className="border-t border-zinc-800/50" />
+                      </>
+                    )}
+                    {productCodeOpts.length > 0 && (
+                      <>
+                        <FilterDimGroup label="Product Code" options={productCodeOpts} dim={filters.productCodes}
+                            onChange={d => setFilters({ ...filters, productCodes: d })} />
                         <div className="border-t border-zinc-800/50" />
                       </>
                     )}

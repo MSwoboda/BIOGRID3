@@ -386,17 +386,22 @@ export default function ReportModal({
   const parsed = parseReport(category, rawReport);
   const r = rawReport;
   const [showRaw, setShowRaw] = useState(false);
-  const { saveReport } = store;
-  const [isSaved, setIsSaved] = useState(false);
+  const { saveReport, removeReport, savedReports } = store;
+  const existingSave = savedReports.find(r => r.id === parsed.id);
+  const [justSaved, setJustSaved] = useState(false);
 
   const handleSave = () => {
-    saveReport({
-      id: parsed.id, category, title: parsed.title,
-      summary: parsed.description.substring(0, 200),
-      rawData: rawReport, notes: '', folderId: null,
-    });
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2000);
+    if (existingSave) {
+      removeReport(parsed.id);
+    } else {
+      saveReport({
+        id: parsed.id, category, title: parsed.title,
+        summary: parsed.description.substring(0, 200),
+        rawData: rawReport, notes: '', folderId: null,
+      });
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
+    }
   };
 
   // ── Device-specific data extraction ────────────────────────────────────────
@@ -546,13 +551,13 @@ export default function ReportModal({
             onClick={handleSave}
             className={cn(
               'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all',
-              isSaved
+              existingSave || justSaved
                 ? 'bg-emerald-900 border-emerald-700 text-emerald-300'
                 : 'bg-zinc-800/60 border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600',
             )}
           >
-            <Bookmark className={cn('w-3.5 h-3.5', isSaved && 'fill-current')} />
-            {isSaved ? 'Saved!' : 'Save'}
+            <Bookmark className={cn('w-3.5 h-3.5', (existingSave || justSaved) && 'fill-current')} />
+            {justSaved ? 'Saved!' : existingSave ? 'Saved' : 'Save'}
           </button>
           {!embedded && (
             <button

@@ -104,6 +104,8 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
     const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
     const [newFolderName, setNewFolderName] = useState('');
     const [activeReportId, setActiveReportId] = useState<string | null>(null);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [lastClickedId, setLastClickedId] = useState<string | null>(null);
     const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
     const [archiveOpen, setArchiveOpen] = useState(false);
     const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
@@ -192,6 +194,37 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
     const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
     const dragCounter = useRef<Record<string, number>>({});
 
+    // ── Move and auto-advance ─────────────────────────────────────────────────
+    const moveAndAdvance = useCallback((reportIds: string[], targetFolderId: string | null) => {
+        // Find next report to select after move
+        const currentReports = savedReports.filter(r =>
+            selectedFolderId === ARCHIVE_ID ? r.folderId === ARCHIVE_ID
+            : selectedFolderId === 'unfiled' ? r.folderId === null
+            : r.folderId === selectedFolderId
+        );
+        const movingSet = new Set(reportIds);
+        const remaining = currentReports.filter(r => !movingSet.has(r.id));
+        // Pick next: prefer the one after the last selected, else the one before
+        const currentIdx = currentReports.findIndex(r => r.id === activeReportId);
+        let nextId: string | null = null;
+        if (remaining.length > 0) {
+            // Find the next remaining report after current position
+            for (let i = currentIdx + 1; i < currentReports.length; i++) {
+                if (!movingSet.has(currentReports[i].id)) { nextId = currentReports[i].id; break; }
+            }
+            // If nothing after, try before
+            if (!nextId) {
+                for (let i = currentIdx - 1; i >= 0; i--) {
+                    if (!movingSet.has(currentReports[i].id)) { nextId = currentReports[i].id; break; }
+                }
+            }
+        }
+        // Perform the moves
+        for (const id of reportIds) moveReport(id, targetFolderId);
+        setActiveReportId(nextId);
+        setSelectedIds(new Set());
+    }, [savedReports, selectedFolderId, activeReportId, moveReport]);
+
     const handleAddFolder = (e: React.FormEvent) => {
         e.preventDefault();
         if (newFolderName.trim()) { addFolder(newFolderName.trim()); setNewFolderName(''); }
@@ -228,9 +261,21 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
         : folders.find(f => f.id === folderId)?.name ?? 'Uncategorized';
 
     const onDragStart = (e: React.DragEvent, reportId: string) => {
+        // If dragging a selected report, drag all selected; otherwise just this one
+        const dragIds = selectedIds.has(reportId) && selectedIds.size > 1
+            ? [...selectedIds] : [reportId];
         setDraggingId(reportId);
         e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', reportId);
+        e.dataTransfer.setData('text/plain', JSON.stringify(dragIds));
+        // Show count badge if multi-dragging
+        if (dragIds.length > 1) {
+            const badge = document.createElement('div');
+            badge.textContent = `${dragIds.length} reports`;
+            badge.style.cssText = 'padding:4px 12px;background:#3b82f6;color:white;border-radius:8px;font-size:12px;font-weight:600;position:fixed;top:-100px';
+            document.body.appendChild(badge);
+            e.dataTransfer.setDragImage(badge, 40, 16);
+            requestAnimationFrame(() => document.body.removeChild(badge));
+        }
     };
     const onDragEnd = () => { setDraggingId(null); setDragOverTarget(null); dragCounter.current = {}; };
     const onFolderDragEnter = (e: React.DragEvent, targetId: string) => {
@@ -248,8 +293,10 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
     const onFolderDragOver = (e: React.DragEvent) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; };
     const onFolderDrop = (e: React.DragEvent, targetFolderId: string | null) => {
         e.preventDefault();
-        const reportId = e.dataTransfer.getData('text/plain') || draggingId;
-        if (reportId) moveReport(reportId, targetFolderId);
+        const raw = e.dataTransfer.getData('text/plain');
+        let ids: string[] = [];
+        try { ids = JSON.parse(raw); } catch { ids = raw ? [raw] : []; }
+        if (ids.length > 0) moveAndAdvance(ids, targetFolderId);
         setDraggingId(null); setDragOverTarget(null); dragCounter.current = {};
     };
     const isOver = (id: string) => dragOverTarget === id && draggingId !== null;
@@ -455,7 +502,10 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                                         : folders.find(f => f.id === selectedFolderId)?.name ?? ''}
                                 </h3>
                             </div>
-                            <span className="text-xs text-zinc-500 shrink-0">{activeReports.length}</span>
+                            <span className="text-xs text-zinc-500 shrink-0">
+                                {selectedIds.size > 0 && <span className="text-blue-400 font-bold">{selectedIds.size} selected · </span>}
+                                {activeReports.length}
+                            </span>
                         </div>
 
                         <div className="flex-1 overflow-y-auto p-2 space-y-1.5 relative">
@@ -467,8 +517,34 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                                 </div>
                             )}
 
-                            {activeReports.map(report => {
+                            {activeReports.map((report, idx) => {
                                 const isDragging = draggingId === report.id;
+                                const isSelected = selectedIds.has(report.id);
+                                const isMultiDragging = isDragging && selectedIds.has(report.id) && selectedIds.size > 1;
+                                const handleClick = (e: React.MouseEvent) => {
+                                    if (e.metaKey || e.ctrlKey) {
+                                        // Toggle selection
+                                        setSelectedIds(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(report.id)) next.delete(report.id);
+                                            else next.add(report.id);
+                                            return next;
+                                        });
+                                        setLastClickedId(report.id);
+                                    } else if (e.shiftKey && lastClickedId) {
+                                        // Range select
+                                        const startIdx = activeReports.findIndex(r => r.id === lastClickedId);
+                                        const endIdx = idx;
+                                        const [lo, hi] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+                                        const rangeIds = activeReports.slice(lo, hi + 1).map(r => r.id);
+                                        setSelectedIds(prev => new Set([...prev, ...rangeIds]));
+                                    } else {
+                                        // Normal click — clear multi-select, set active
+                                        setSelectedIds(new Set());
+                                        setActiveReportId(report.id);
+                                        setLastClickedId(report.id);
+                                    }
+                                };
                                 return (
                                     <div
                                         key={report.id}
@@ -477,17 +553,26 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                                         onDragEnd={onDragEnd}
                                         className={cn(
                                             'rounded-lg border transition-all duration-150 relative group select-none',
+                                            isSelected ? 'bg-blue-950/40 border-blue-800' :
                                             activeReportId === report.id ? 'bg-zinc-900/60 border-zinc-700' : 'bg-zinc-950 border-zinc-800 hover:border-zinc-600',
-                                            isDragging && 'opacity-40 scale-95 cursor-grabbing border-blue-700',
+                                            (isDragging || (isMultiDragging && isSelected)) && 'opacity-40 scale-95 cursor-grabbing border-blue-700',
                                             !isDragging && 'cursor-grab active:cursor-grabbing'
                                         )}
                                     >
-                                        {/* Drag dots */}
-                                        <div className="absolute left-1 top-1/2 -translate-y-1/2 flex flex-col gap-0.5 opacity-0 group-hover:opacity-30 pointer-events-none">
-                                            {[0,1,2].map(i => <div key={i} className="flex gap-0.5"><div className="w-0.5 h-0.5 rounded-full bg-zinc-400"/><div className="w-0.5 h-0.5 rounded-full bg-zinc-400"/></div>)}
+                                        {/* Selection checkbox / drag dots */}
+                                        <div className="absolute left-1 top-1/2 -translate-y-1/2 flex flex-col gap-0.5 pointer-events-none">
+                                            {isSelected ? (
+                                                <div className="w-3.5 h-3.5 rounded bg-blue-600 flex items-center justify-center">
+                                                    <Check className="w-2.5 h-2.5 text-white" />
+                                                </div>
+                                            ) : (
+                                                <div className="opacity-0 group-hover:opacity-30">
+                                                    {[0,1,2].map(i => <div key={i} className="flex gap-0.5"><div className="w-0.5 h-0.5 rounded-full bg-zinc-400"/><div className="w-0.5 h-0.5 rounded-full bg-zinc-400"/></div>)}
+                                                </div>
+                                            )}
                                         </div>
 
-                                        <button onClick={() => setActiveReportId(report.id)} className="w-full text-left p-2.5 pl-4 block">
+                                        <button onClick={handleClick} className="w-full text-left p-2.5 pl-5 block">
                                             <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                                                 <span className="font-mono text-[9px] font-bold text-zinc-500 uppercase tracking-widest">{report.category}</span>
                                                 <span className="text-[9px] text-zinc-600">{formatDate(report.savedAt)}</span>
@@ -501,7 +586,7 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                                             <div className="absolute inset-0 bg-zinc-900/95 backdrop-blur-sm rounded-lg flex flex-col items-center justify-center gap-2 p-2 z-10">
                                                 <p className="text-[10px] font-semibold text-zinc-300">Remove this report?</p>
                                                 <div className="flex gap-1.5">
-                                                    <button onClick={() => { moveReport(report.id, ARCHIVE_ID); setConfirmRemoveId(null); }}
+                                                    <button onClick={() => { moveAndAdvance([report.id], ARCHIVE_ID); setConfirmRemoveId(null); }}
                                                         className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-[10px] font-semibold">
                                                         <Archive className="w-2.5 h-2.5" /> Archive
                                                     </button>
@@ -560,32 +645,44 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                                 </div>
 
                                 <div className="flex items-center gap-2 ml-auto">
-                                    <div className="relative group">
-                                        <button className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-xs font-semibold text-zinc-400 hover:bg-zinc-800 transition-colors">
-                                            <FolderOpen className="w-3.5 h-3.5" /> Move
-                                        </button>
-                                        <div className="absolute right-0 top-full mt-1 w-52 bg-zinc-900 border border-zinc-800 shadow-xl rounded-lg py-1 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-all z-20">
-                                            <button onClick={() => moveReport(activeReport.id, null)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 flex items-center gap-2">
-                                                <FileText className="w-3.5 h-3.5" /> Uncategorized
-                                            </button>
-                                            {folders.map(f => (
-                                                <button key={f.id} onClick={() => moveReport(activeReport.id, f.id)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 flex items-center gap-2">
-                                                    <FolderOpen className="w-3.5 h-3.5" /> {f.name}
+                                    {(() => {
+                                        // Collect IDs to move: selected reports or just the active one
+                                        const moveIds = selectedIds.size > 0 ? [...selectedIds] :
+                                            activeReport ? [activeReport.id] : [];
+                                        const moveCount = moveIds.length;
+                                        return (
+                                            <>
+                                            <div className="relative group">
+                                                <button className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-xs font-semibold text-zinc-400 hover:bg-zinc-800 transition-colors">
+                                                    <FolderOpen className="w-3.5 h-3.5" /> Move{moveCount > 1 ? ` (${moveCount})` : ''}
                                                 </button>
-                                            ))}
-                                            <div className="border-t border-zinc-800 mt-1 pt-1">
-                                                <button onClick={() => moveReport(activeReport.id, ARCHIVE_ID)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-500 hover:bg-zinc-800 flex items-center gap-2">
-                                                    <Archive className="w-3.5 h-3.5" /> Archive
-                                                </button>
+                                                <div className="absolute right-0 top-full pt-1 w-52 z-20 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-all">
+                                                  <div className="bg-zinc-900 border border-zinc-800 shadow-xl rounded-lg py-1">
+                                                    <button onClick={() => moveAndAdvance(moveIds, null)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 flex items-center gap-2">
+                                                        <FileText className="w-3.5 h-3.5" /> Uncategorized
+                                                    </button>
+                                                    {folders.map(f => (
+                                                        <button key={f.id} onClick={() => moveAndAdvance(moveIds, f.id)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 flex items-center gap-2">
+                                                            <FolderOpen className="w-3.5 h-3.5" /> {f.name}
+                                                        </button>
+                                                    ))}
+                                                    <div className="border-t border-zinc-800 mt-1 pt-1">
+                                                        <button onClick={() => moveAndAdvance(moveIds, ARCHIVE_ID)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-500 hover:bg-zinc-800 flex items-center gap-2">
+                                                            <Archive className="w-3.5 h-3.5" /> Archive
+                                                        </button>
+                                                    </div>
+                                                  </div>
+                                                </div>
                                             </div>
-                                        </div>
-                                    </div>
-                                    <button
-                                        onClick={() => { removeReport(activeReport.id); setActiveReportId(null); }}
-                                        className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-950 border border-zinc-800 hover:border-red-900 rounded transition-colors"
-                                    >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
+                                            <button
+                                                onClick={() => { removeReport(activeReport.id); setActiveReportId(null); setSelectedIds(new Set()); }}
+                                                className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-950 border border-zinc-800 hover:border-red-900 rounded transition-colors"
+                                            >
+                                                <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
+                                            </>
+                                        );
+                                    })()}
                                 </div>
                             </div>
 
