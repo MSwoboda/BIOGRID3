@@ -2,7 +2,7 @@
 // Firestore helpers — read/write user data under users/{uid}/...
 import {
   collection, doc, getDocs, setDoc, deleteDoc, writeBatch,
-  getFirestore, getDoc, QuerySnapshot, DocumentData,
+  getFirestore, getDoc, updateDoc, QuerySnapshot, DocumentData,
 } from 'firebase/firestore';
 import { app } from './firebase';
 import type { SavedReport, Folder, SearchHistoryItem, ManufacturerGroup } from '../types';
@@ -20,6 +20,7 @@ export interface UserProfile {
   createdAt: number;
   updatedAt?: number;
   paused?: boolean;
+  avatarSeed?: string;
 }
 
 // Named database created in the biogrid-app project
@@ -103,11 +104,10 @@ const profileDoc = (uid: string) => doc(db, 'users', uid, 'profile', 'data');
 // Top-level denormalised index for admin dashboard (no subcollection traversal needed)
 const userIndexDoc = (uid: string) => doc(db, 'userIndex', uid);
 
-export async function saveUserProfile(uid: string, profile: UserProfile, email?: string): Promise<void> {
+export async function saveUserProfile(uid: string, profile: UserProfile, email?: string, photoURL?: string): Promise<void> {
   const now = Date.now();
   await setDoc(profileDoc(uid), { ...profile, updatedAt: now });
   // Also write to userIndex so the admin dashboard can list all users efficiently.
-  // Rules: only the user themselves can write; only admins can read.
   await setDoc(userIndexDoc(uid), {
     uid,
     email: email ?? '',
@@ -118,12 +118,28 @@ export async function saveUserProfile(uid: string, profile: UserProfile, email?:
     createdAt: profile.createdAt,
     updatedAt: now,
     paused: profile.paused ?? false,
+    avatarSeed: profile.avatarSeed ?? '',
+    photoURL: photoURL ?? '',
   });
 }
 
 export async function loadUserProfile(uid: string): Promise<UserProfile | null> {
   const snap = await getDoc(profileDoc(uid));
   return snap.exists() ? (snap.data() as UserProfile) : null;
+}
+
+/** Patch photoURL (and avatarSeed) into userIndex so admin sees current images. */
+export async function syncUserIndex(uid: string, photoURL?: string | null, avatarSeed?: string): Promise<void> {
+  try {
+    const patch: Record<string, any> = {};
+    if (photoURL !== undefined) patch.photoURL = photoURL ?? '';
+    if (avatarSeed !== undefined) patch.avatarSeed = avatarSeed;
+    if (Object.keys(patch).length > 0) {
+      await updateDoc(userIndexDoc(uid), patch);
+    }
+  } catch {
+    // userIndex doc may not exist yet (first login before onboarding) — ignore
+  }
 }
 
 function getClientDetails() {

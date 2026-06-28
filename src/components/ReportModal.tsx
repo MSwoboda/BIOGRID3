@@ -4,9 +4,13 @@ import { parseReport } from '../lib/api';
 import { useStore } from '../store';
 import type { Category } from '../types';
 import {
-  X, Bookmark, Clock, Box, Activity, ChevronRight,
-  Pill as PillIcon, Apple, Cigarette, AlertTriangle,
+  X, Bookmark, Clock, Box, Activity, ChevronRight, ChevronDown, Download,
+  Pill as PillIcon, Apple, Cigarette, AlertTriangle, Share2,
 } from 'lucide-react';
+import { createShareLink } from '../lib/share';
+import ShareLinkDialog from './ShareLinkDialog';
+import { exportSingleReportToPDF, exportSingleReportToDOCX } from '../lib/export';
+import type { SavedReport } from '../types';
 
 // ── Shared tiny components ───────────────────────────────────────────────────
 
@@ -376,12 +380,16 @@ export default function ReportModal({
   onClose,
   store,
   embedded = false,
+  uid,
+  showToast,
 }: {
   rawReport: any;
   category: Category;
   onClose: () => void;
   store: ReturnType<typeof useStore>;
   embedded?: boolean;
+  uid?: string | null;
+  showToast?: (msg: string, type: 'success' | 'error' | 'info') => void;
 }) {
   const parsed = parseReport(category, rawReport);
   const r = rawReport;
@@ -389,6 +397,7 @@ export default function ReportModal({
   const { saveReport, removeReport, savedReports } = store;
   const existingSave = savedReports.find(r => r.id === parsed.id);
   const [justSaved, setJustSaved] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
 
   const handleSave = () => {
     if (existingSave) {
@@ -526,6 +535,7 @@ export default function ReportModal({
   );
 
   return (
+    <>
     <Outer>
       {/* ── HEADER BAND ───────────────────────────────────────────────────── */}
       <div className={cn('bg-gradient-to-r px-6 pt-5 pb-4 border-b flex items-start gap-4', headerGrad)}>
@@ -559,6 +569,72 @@ export default function ReportModal({
             <Bookmark className={cn('w-3.5 h-3.5', (existingSave || justSaved) && 'fill-current')} />
             {justSaved ? 'Saved!' : existingSave ? 'Saved' : 'Save'}
           </button>
+          {uid && (
+            <button
+              onClick={async () => {
+                try {
+                  const report = {
+                    id: parsed.id, category, title: parsed.title,
+                    summary: parsed.description.substring(0, 200),
+                    rawData: rawReport, notes: '', folderId: null,
+                    savedAt: Date.now(),
+                  };
+                  const url = await createShareLink(uid, 'report', { report });
+                  setShareUrl(url);
+                } catch (err) {
+                  console.error('Share failed:', err);
+                  showToast?.('Failed to share', 'error');
+                }
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border bg-zinc-800/60 border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-all"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              Share
+            </button>
+          )}
+          {/* Download dropdown */}
+          <div className="relative group">
+            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border bg-zinc-800/60 border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-all">
+              <Download className="w-3.5 h-3.5" />
+              <ChevronDown className="w-3 h-3" />
+            </button>
+            <div className="absolute right-0 top-full pt-1 w-36 z-50 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-all">
+              <div className="bg-zinc-900 border border-zinc-700 shadow-xl rounded-lg py-1">
+                <button
+                  onClick={() => {
+                    const sr: SavedReport = {
+                      id: parsed.id, category, title: parsed.title,
+                      summary: parsed.description.substring(0, 200),
+                      rawData: rawReport, notes: '', folderId: null, savedAt: Date.now(),
+                    };
+                    exportSingleReportToPDF(sr);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                >PDF</button>
+                <button
+                  onClick={() => {
+                    const sr: SavedReport = {
+                      id: parsed.id, category, title: parsed.title,
+                      summary: parsed.description.substring(0, 200),
+                      rawData: rawReport, notes: '', folderId: null, savedAt: Date.now(),
+                    };
+                    exportSingleReportToDOCX(sr);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                >Word (.docx)</button>
+                <button
+                  onClick={() => {
+                    const blob = new Blob([JSON.stringify(rawReport, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = `${parsed.id}_report.json`; a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                >JSON (raw)</button>
+              </div>
+            </div>
+          </div>
           {!embedded && (
             <button
               onClick={onClose}
@@ -839,5 +915,7 @@ export default function ReportModal({
 
       </div>{/* end scrollable */}
     </Outer>
+    {shareUrl && <ShareLinkDialog url={shareUrl} onClose={() => setShareUrl(null)} />}
+    </>
   );
 }

@@ -1,6 +1,6 @@
 import React from 'react';
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Category, SearchResult, CountResult, ManufacturerGroup } from './types';
+import { Category, SearchResult, CountResult, ManufacturerGroup, FiltersSnapshot } from './types';
 
 import { fetchFDAData, fetchFDACounts, fetchDeviceRecalls, fetchDeviceRecallCounts, extractDeviceIdentifiers, autoGroupManufacturers, parseReport, detectQueryFieldKey, probeFallbackFields, resolveSearchFields, SEARCH_FIELD_GROUPS } from './lib/api';
 import type { DeviceIdentifier } from './lib/api';
@@ -14,12 +14,16 @@ import { Search, FolderOpen, PieChart, List as ListIcon, Download, Bookmark, Ale
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import SavedScreen from './components/SavedScreen';
 import ReportModal from './components/ReportModal';
+import { exportSearchResultsToXLSX, exportSearchResultsToPDF, exportSearchResultsToDOCX } from './lib/export';
+import { createShareLink, copyToClipboard } from './lib/share';
+import ShareLinkDialog from './components/ShareLinkDialog';
 import SplashScreen from './components/SplashScreen';
 import AuthModal from './components/AuthModal';
 import OnboardingFlow from './components/OnboardingFlow';
 import ProfileModal from './components/ProfileModal';
 import { useAuth } from './hooks/useAuth';
 import AdminDashboard from './components/AdminDashboard';
+import GlyphAvatar from './components/GlyphAvatar';
 import AiInsightsView from './components/AiInsightsView';
 import type { ChatMessage } from './components/AiInsightsView';
 import { useAdmin } from './hooks/useAdmin';
@@ -93,6 +97,45 @@ export default function App() {
   };
 
   const isDemoMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('demo') === '1';
+
+  // ── Handle ?share=ID URL parameter ─────────────────────────────────────────
+  const shareHandled = useRef(false);
+  useEffect(() => {
+    if (!user || shareHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const shareId = params.get('share');
+    if (!shareId) return;
+    shareHandled.current = true;
+    // Clean the URL
+    const url = new URL(window.location.href);
+    url.searchParams.delete('share');
+    window.history.replaceState({}, '', url.toString());
+    // Fetch share
+    import('./lib/share').then(({ getShareDoc }) => {
+      getShareDoc(shareId).then(shareDoc => {
+        if (!shareDoc) { showToast('Shared link not found or expired', 'error'); return; }
+        if (shareDoc.type === 'search' && shareDoc.search) {
+          setSearchCategory(shareDoc.search.category);
+          setActiveTab('search');
+          setPendingReplay(shareDoc.search);
+          showToast('Shared search loaded!', 'success');
+        } else if (shareDoc.type === 'report' && shareDoc.report) {
+          store.saveReport(shareDoc.report);
+          setActiveTab('saved');
+          showToast(`Report "${shareDoc.report.title}" saved to your library!`, 'success');
+        } else if (shareDoc.type === 'folder' && shareDoc.folder) {
+          const { folder, reports } = shareDoc.folder;
+          // Create folder and import all reports
+          const newFolder = store.addFolder(folder.name);
+          for (const r of reports) {
+            store.saveReport({ ...r, folderId: newFolder.id });
+          }
+          setActiveTab('saved');
+          showToast(`Folder "${folder.name}" with ${reports.length} reports imported!`, 'success');
+        }
+      }).catch(() => showToast('Failed to load shared item', 'error'));
+    });
+  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Show splash for unauthenticated users or during profile fetch
   if (!isDemoMode && (authLoading || (user && profileLoading && !profile))) {
@@ -259,9 +302,7 @@ export default function App() {
               <img src={user.photoURL} alt={profile ? `${profile.firstName} ${profile.lastName}` : (user.displayName ?? 'User')}
                 className="w-7 h-7 rounded-full ring-2 ring-zinc-700 shrink-0" />
             ) : (
-              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-white font-bold text-xs shrink-0">
-                {profile ? `${profile.firstName[0] ?? ''}${profile.lastName[0] ?? ''}`.toUpperCase() : (user.displayName ?? user.email ?? 'U')[0].toUpperCase()}
-              </div>
+              <GlyphAvatar seed={profile?.avatarSeed || user.uid || user.email || 'user'} size={28} className="ring-2 ring-zinc-700 shrink-0" />
             )}
             {isSidebarOpen && (
               <div className="flex-1 min-w-0 text-left">
@@ -320,6 +361,7 @@ export default function App() {
                pendingReplay={pendingReplay}
                clearPendingReplay={() => setPendingReplay(null)}
                showToast={showToast}
+               uid={user?.uid}
              />
            </div>
            {activeTab === 'history' && <HistoryScreen store={store} onReplay={(item) => {
@@ -329,7 +371,7 @@ export default function App() {
              // Use a small state in App to signal a pending replay
              setPendingReplay(item);
            }} />}
-           {activeTab === 'saved' && <SavedScreen store={store} />}
+           {activeTab === 'saved' && <SavedScreen store={store} uid={user?.uid} showToast={showToast} />}
            {activeTab === 'admin' && isAdmin && <AdminDashboard />}
         </div>
       </main>
@@ -883,13 +925,14 @@ function ProblemBarChart({
   );
 }
 
-function SearchScreen({ category, setCategory, store, pendingReplay, clearPendingReplay, showToast }: {
+function SearchScreen({ category, setCategory, store, pendingReplay, clearPendingReplay, showToast, uid }: {
   category: Category;
   setCategory: (c: Category) => void;
   store: ReturnType<typeof useStore>;
   pendingReplay?: import('./types').SearchHistoryItem | null;
   clearPendingReplay?: () => void;
-  showToast?: (message: string, type?: 'success' | 'info' | 'remove') => void;
+  showToast?: (message: string, type?: 'success' | 'info' | 'remove' | 'error') => void;
+  uid?: string | null;
 }) {
   const [queries, setQueries] = useState<string[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -906,6 +949,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
 
   // AI Insights chat state — lifted here so it persists across tab switches
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
 
   const [error, setError] = useState('');
   const [hasSearched, setHasSearched] = useState(false);
@@ -921,13 +965,9 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
     const qs = item.queries?.length ? item.queries : [item.query];
     setQueries(qs);
     setInputValue('');
-    if (item.filters?.startDate !== undefined || item.filters?.endDate !== undefined) {
-      setFilters(prev => ({ ...prev,
-        startDate: item.filters?.startDate ?? '',
-        endDate: item.filters?.endDate ?? '',
-        limit: item.filters?.limit ?? 500,
-        searchField: item.filters?.searchField ?? 'auto',
-      }));
+    // Restore the full filter snapshot if available
+    if (item.filters) {
+      setFilters({ ...EMPTY_FILTERS, ...item.filters });
     }
     // Fire search after state update
     setTimeout(() => handleSearch(undefined, qs), 0);
@@ -1244,12 +1284,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
       const perQueryLimit = Math.ceil(limitToFetch === Infinity ? Infinity : limitToFetch / (searchQueries.length || 1));
 
       // Save combined history item once per search (not per query term)
-      addSearchHistory(category, effectiveQueries, {
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-        limit: typeof filters.limit === 'number' ? filters.limit : 500,
-        searchField: filters.searchField,
-      });
+      addSearchHistory(category, effectiveQueries, { ...filters } as FiltersSnapshot);
 
       for (const q of searchQueries) {
         // --- Step 1: determine initial field group ---
@@ -1766,7 +1801,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
           <div className="w-full max-w-7xl ml-auto">
                {/* Controls Bar */}
                {/* Controls Bar — compact single row */}
-               <div className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-lg shadow-sm border border-zinc-800 overflow-hidden">
+               <div className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-lg shadow-sm border border-zinc-800">
 
                   {/* LEFT: count + pills — shrinks gracefully */}
                   <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden text-xs">
@@ -1916,7 +1951,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                                    const currentItem: import('./types').SearchHistoryItem = {
                                      id: '', category, query: searchedQueries.join(', '),
                                      queries: searchedQueries, timestamp: Date.now(),
-                                     filters: { startDate: filters.startDate, endDate: filters.endDate, limit: typeof filters.limit === 'number' ? filters.limit : 500, searchField: filters.searchField },
+                                     filters: { ...filters } as FiltersSnapshot,
                                    };
                                    saveQuery(currentItem, saveSearchLabel.trim());
                                    setShowSaveSearch(false);
@@ -1935,7 +1970,7 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                                  const currentItem: import('./types').SearchHistoryItem = {
                                    id: '', category, query: searchedQueries.join(', '),
                                    queries: searchedQueries, timestamp: Date.now(),
-                                   filters: { startDate: filters.startDate, endDate: filters.endDate, limit: typeof filters.limit === 'number' ? filters.limit : 500, searchField: filters.searchField },
+                                   filters: { ...filters } as FiltersSnapshot,
                                  };
                                  saveQuery(currentItem, saveSearchLabel.trim());
                                  setShowSaveSearch(false);
@@ -1949,6 +1984,26 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                        </div>
                      )}
 
+                     {/* Share search button */}
+                     {searchedQueries.length > 0 && uid && (
+                       <button
+                         onClick={async () => {
+                           try {
+                             const searchItem: import('./types').SearchHistoryItem = {
+                               id: generateId(), category, query: searchedQueries.join(', '),
+                               queries: searchedQueries, timestamp: Date.now(),
+                               filters: { ...filters } as FiltersSnapshot,
+                             };
+                             const url = await createShareLink(uid, 'search', { search: searchItem });
+                             setShareUrl(url);
+                           } catch (err) { console.error('Share failed:', err); showToast?.('Failed to create share link', 'info'); }
+                         }}
+                         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 text-xs font-semibold text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 transition-colors whitespace-nowrap"
+                         title="Share this search"
+                       >
+                         <Share2 className="w-3.5 h-3.5" /> Share
+                       </button>
+                     )}
                      {viewMode === 'list' && (
                        <select value={rowsPerPage} onChange={e => {setRowsPerPage(parseInt(e.target.value)); setCurrentPage(1);}}
                          className="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-1 text-xs text-zinc-300 outline-none"
@@ -1959,9 +2014,19 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
                        </select>
                      )}
 
-                     <button onClick={exportAsCSV} className="flex items-center gap-1.5 px-2.5 py-1.5 border border-zinc-800 text-zinc-400 rounded hover:bg-zinc-900 text-xs font-semibold whitespace-nowrap">
-                       <Download className="w-3.5 h-3.5" /> Export
-                     </button>
+                     <div className="relative group">
+                       <button className="flex items-center gap-1.5 px-2.5 py-1.5 border border-zinc-800 text-zinc-400 rounded hover:bg-zinc-900 text-xs font-semibold whitespace-nowrap">
+                         <Download className="w-3.5 h-3.5" /> Export <ChevronDown className="w-3 h-3" />
+                       </button>
+                       <div className="absolute right-0 top-full pt-1 w-40 z-50 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-all">
+                         <div className="bg-zinc-900 border border-zinc-700 shadow-xl rounded-lg py-1">
+                           <button onClick={exportAsCSV} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">CSV</button>
+                           <button onClick={() => exportSearchResultsToXLSX(filteredResults, category, searchedQueries)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">Excel (.xlsx)</button>
+                           <button onClick={() => exportSearchResultsToPDF(filteredResults, category, searchedQueries)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">PDF</button>
+                           <button onClick={() => exportSearchResultsToDOCX(filteredResults, category, searchedQueries)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">Word (.docx)</button>
+                         </div>
+                       </div>
+                     </div>
                   </div>
                </div>
           </div>
@@ -2141,7 +2206,8 @@ function SearchScreen({ category, setCategory, store, pendingReplay, clearPendin
          )}
          
          {showFiltersModal && <FiltersModal filters={filters} setFilters={setFilters} onClose={() => setShowFiltersModal(false)} results={results} category={category} />}
-         {selectedReport && <ReportModal rawReport={selectedReport} category={category} onClose={() => setSelectedReport(null)} store={store} />}
+         {selectedReport && <ReportModal rawReport={selectedReport} category={category} onClose={() => setSelectedReport(null)} store={store} uid={uid} showToast={showToast} />}
+         {shareUrl && <ShareLinkDialog url={shareUrl} onClose={() => setShareUrl(null)} />}
       </div>
     </div>
   );

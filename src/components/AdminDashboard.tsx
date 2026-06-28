@@ -16,6 +16,7 @@ import {
   purgeUserData
 } from '../lib/adminFirestore';
 import { cn } from '../lib/utils';
+import GlyphAvatar from './GlyphAvatar';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -393,9 +394,11 @@ export default function AdminDashboard() {
                       >
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2.5">
-                            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-zinc-600 to-zinc-800 border border-zinc-700 flex items-center justify-center text-[10px] font-black text-zinc-300 shrink-0">
-                              {(u.firstName?.[0] ?? '') + (u.lastName?.[0] ?? '') || '?'}
-                            </div>
+                            {u.photoURL ? (
+                              <img src={u.photoURL} alt="" className="w-7 h-7 rounded-full shrink-0 object-cover" />
+                            ) : (
+                              <GlyphAvatar seed={u.avatarSeed || u.uid || u.email} size={28} className="shrink-0" />
+                            )}
                             <span className="text-zinc-200 font-medium truncate max-w-[120px] flex items-center gap-1.5">
                               {[u.firstName, u.lastName].filter(Boolean).join(' ') || '—'}
                               {u.paused && (
@@ -487,6 +490,7 @@ function UserDetailModal({ user, onClose, onStatusChanged }: UserDetailModalProp
   const [logins, setLogins]       = useState<any[]>([]);
   const [searches, setSearches]   = useState<any[]>([]);
   const [saved, setSaved]         = useState<any[]>([]);
+  const [auditError, setAuditError] = useState<string | null>(null);
   const [loading, setLoading]     = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -494,20 +498,23 @@ function UserDetailModal({ user, onClose, onStatusChanged }: UserDetailModalProp
 
   const loadAuditData = async () => {
     setLoading(true);
-    try {
-      const [lData, sData, rData] = await Promise.all([
-        getUserLoginHistory(user.uid),
-        getUserSearchHistory(user.uid),
-        getUserSavedReports(user.uid),
-      ]);
-      setLogins(lData);
-      setSearches(sData);
-      setSaved(rData);
-    } catch (e) {
-      console.error('Failed to load user audits:', e);
-    } finally {
-      setLoading(false);
+    setAuditError(null);
+    const errors: string[] = [];
+
+    // Run each query independently so one failure doesn't blank the others
+    try { setLogins(await getUserLoginHistory(user.uid)); }
+    catch (e: any) { console.error('[Admin] logins:', e); errors.push('Login history'); setLogins([]); }
+
+    try { setSearches(await getUserSearchHistory(user.uid)); }
+    catch (e: any) { console.error('[Admin] searches:', e); errors.push('Search history'); setSearches([]); }
+
+    try { setSaved(await getUserSavedReports(user.uid)); }
+    catch (e: any) { console.error('[Admin] reports:', e); errors.push('Saved reports'); setSaved([]); }
+
+    if (errors.length > 0) {
+      setAuditError(`Permission denied for: ${errors.join(', ')}. Check that admins/${user.uid} exists or that Firestore rules allow admin reads.`);
     }
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -554,9 +561,11 @@ function UserDetailModal({ user, onClose, onStatusChanged }: UserDetailModalProp
         {/* Header */}
         <div className="p-6 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/10 shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-zinc-650 to-zinc-800 border border-zinc-700 flex items-center justify-center text-sm font-black text-zinc-100 shadow-inner">
-              {(user.firstName?.[0] ?? '') + (user.lastName?.[0] ?? '') || '?'}
-            </div>
+            {user.photoURL ? (
+              <img src={user.photoURL} alt="" className="w-10 h-10 rounded-full object-cover shadow-inner" />
+            ) : (
+              <GlyphAvatar seed={user.avatarSeed || user.uid || user.email} size={40} className="shadow-inner" />
+            )}
             <div>
               <h3 className="text-base font-black text-zinc-100 leading-snug flex items-center gap-2">
                 {[user.firstName, user.lastName].filter(Boolean).join(' ') || 'User Record'}
@@ -569,12 +578,22 @@ function UserDetailModal({ user, onClose, onStatusChanged }: UserDetailModalProp
               <span className="text-xs text-zinc-500 block truncate max-w-[280px]">{user.email}</span>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 rounded-lg transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadAuditData}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 text-[11px] font-semibold transition-all disabled:opacity-50"
+            >
+              <RefreshCw className={cn('w-3 h-3', loading && 'animate-spin')} />
+              Refresh
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 rounded-lg transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -604,6 +623,13 @@ function UserDetailModal({ user, onClose, onStatusChanged }: UserDetailModalProp
             </div>
           ) : (
             <>
+              {/* Error banner */}
+              {auditError && (
+                <div className="flex items-start gap-3 p-3 mb-4 rounded-xl border border-amber-800/60 bg-amber-950/30">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-400">{auditError}</p>
+                </div>
+              )}
               {/* OVERVIEW TAB */}
               {activeTab === 'overview' && (
                 <div className="space-y-6">

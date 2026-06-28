@@ -5,8 +5,12 @@ import {
     FolderOpen, Plus, Trash2, FileText, Bookmark,
     Archive, Pencil, Check, X, AlertTriangle, ChevronDown,
     ChevronLeft, ChevronRight, PanelLeftClose, PanelLeft,
+    Download, Share2,
 } from 'lucide-react';
 import ReportModal from './ReportModal';
+import { exportSingleReportToPDF, exportSingleReportToDOCX, exportFolderToXLSX, exportFolderToPDF, exportFolderToDOCX } from '../lib/export';
+import { createShareLink, copyToClipboard } from '../lib/share';
+import ShareLinkDialog from './ShareLinkDialog';
 
 // ── Special folder constant ────────────────────────────────────────────────────
 const ARCHIVE_ID = 'archive';
@@ -99,7 +103,7 @@ function ResizeDivider({
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
-export default function SavedScreen({ store }: { store: ReturnType<typeof useStore> }) {
+export default function SavedScreen({ store, uid, showToast }: { store: ReturnType<typeof useStore>; uid?: string | null; showToast?: (msg: string, type: 'success' | 'error' | 'info') => void }) {
     const { folders, savedReports, addFolder, removeFolder, renameFolder, updateReportNotes, moveReport, removeReport } = store;
     const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
     const [newFolderName, setNewFolderName] = useState('');
@@ -111,6 +115,8 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
     const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
     const renameInputRef = useRef<HTMLInputElement>(null);
     const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+    const [shareUrl, setShareUrl] = useState<string | null>(null);
+    const [confirmBulkDelete, setConfirmBulkDelete] = useState<string[] | null>(null);
 
     // ── Panel widths (desktop only) ──────────────────────────────────────────
     const [folderW, setFolderW] = useState(DEFAULT_FOLDER_W);
@@ -224,6 +230,26 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
         setActiveReportId(nextId);
         setSelectedIds(new Set());
     }, [savedReports, selectedFolderId, activeReportId, moveReport]);
+
+    // ── Delete key handler ────────────────────────────────────────────────────
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            // Don't trigger if user is typing in an input/textarea
+            const tag = (e.target as HTMLElement)?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                const ids = selectedIds.size > 0 ? [...selectedIds]
+                    : activeReportId ? [activeReportId] : [];
+                if (ids.length > 0) {
+                    e.preventDefault();
+                    setConfirmBulkDelete(ids);
+                }
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [selectedIds, activeReportId]);
 
     const handleAddFolder = (e: React.FormEvent) => {
         e.preventDefault();
@@ -502,10 +528,46 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                                         : folders.find(f => f.id === selectedFolderId)?.name ?? ''}
                                 </h3>
                             </div>
-                            <span className="text-xs text-zinc-500 shrink-0">
-                                {selectedIds.size > 0 && <span className="text-blue-400 font-bold">{selectedIds.size} selected · </span>}
-                                {activeReports.length}
-                            </span>
+                            <div className="flex items-center gap-1">
+                                <span className="text-xs text-zinc-500 shrink-0">
+                                    {selectedIds.size > 0 && <span className="text-blue-400 font-bold">{selectedIds.size} selected · </span>}
+                                    {activeReports.length}
+                                </span>
+
+                                {/* Share folder */}
+                                {uid && activeReports.length > 0 && selectedFolderId && selectedFolderId !== 'unfiled' && selectedFolderId !== ARCHIVE_ID && (
+                                    <button
+                                        onClick={async () => {
+                                            const folder = folders.find(f => f.id === selectedFolderId);
+                                            if (!folder || !uid) return;
+                                            try {
+                                                const url = await createShareLink(uid, 'folder', { folder: { folder, reports: activeReports } });
+                                                setShareUrl(url);
+                                            } catch (err) { console.error('Share folder failed:', err); showToast?.('Failed to share folder', 'info'); }
+                                        }}
+                                        className="p-1 text-zinc-600 hover:text-blue-400 rounded transition-colors"
+                                        title="Share folder"
+                                    >
+                                        <Share2 className="w-3.5 h-3.5" />
+                                    </button>
+                                )}
+
+                                {/* Export folder */}
+                                {activeReports.length > 0 && (
+                                    <div className="relative group">
+                                        <button className="p-1 text-zinc-600 hover:text-emerald-400 rounded transition-colors" title="Export folder">
+                                            <Download className="w-3.5 h-3.5" />
+                                        </button>
+                                        <div className="absolute right-0 top-full pt-1 w-36 z-50 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-all">
+                                            <div className="bg-zinc-900 border border-zinc-700 shadow-xl rounded-lg py-1">
+                                                <button onClick={() => { const fn = folderName(selectedFolderId); exportFolderToXLSX(activeReports, fn); }} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">Excel (.xlsx)</button>
+                                                <button onClick={() => { const fn = folderName(selectedFolderId); exportFolderToPDF(activeReports, fn); }} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">PDF</button>
+                                                <button onClick={() => { const fn = folderName(selectedFolderId); exportFolderToDOCX(activeReports, fn); }} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">Word (.docx)</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
                         <div className="flex-1 overflow-y-auto p-2 space-y-1.5 relative">
@@ -680,6 +742,35 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                             </button>
+
+                                            {/* Share report */}
+                                            {uid && (
+                                                <button
+                                                    onClick={async () => {
+                                                        try {
+                                                            const url = await createShareLink(uid, 'report', { report: activeReport });
+                                                            setShareUrl(url);
+                                                        } catch (err) { console.error('Share failed:', err); showToast?.('Failed to share', 'info'); }
+                                                    }}
+                                                    className="p-1.5 text-zinc-500 hover:text-blue-400 hover:bg-blue-950 border border-zinc-800 hover:border-blue-900 rounded transition-colors"
+                                                    title="Share report"
+                                                >
+                                                    <Share2 className="w-3.5 h-3.5" />
+                                                </button>
+                                            )}
+
+                                            {/* Export report */}
+                                            <div className="relative group">
+                                                <button className="p-1.5 text-zinc-500 hover:text-emerald-400 hover:bg-emerald-950 border border-zinc-800 hover:border-emerald-900 rounded transition-colors" title="Export report">
+                                                    <Download className="w-3.5 h-3.5" />
+                                                </button>
+                                                <div className="absolute right-0 top-full pt-1 w-36 z-50 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-all">
+                                                    <div className="bg-zinc-900 border border-zinc-700 shadow-xl rounded-lg py-1">
+                                                        <button onClick={() => exportSingleReportToPDF(activeReport)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">PDF</button>
+                                                        <button onClick={() => exportSingleReportToDOCX(activeReport)} className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">Word (.docx)</button>
+                                                    </div>
+                                                </div>
+                                            </div>
                                             </>
                                         );
                                     })()}
@@ -723,6 +814,59 @@ export default function SavedScreen({ store }: { store: ReturnType<typeof useSto
                     )}
                 </div>
             </div>
+            {shareUrl && <ShareLinkDialog url={shareUrl} onClose={() => setShareUrl(null)} />}
+
+            {/* Bulk delete / archive confirmation modal */}
+            {confirmBulkDelete && confirmBulkDelete.length > 0 && (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setConfirmBulkDelete(null)} />
+                    <div className="relative bg-zinc-900 border border-zinc-700/80 rounded-2xl w-full max-w-sm shadow-2xl p-6">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-10 h-10 rounded-xl bg-red-950/60 border border-red-900/60 flex items-center justify-center">
+                                <Trash2 className="w-5 h-5 text-red-400" />
+                            </div>
+                            <div>
+                                <h3 className="text-sm font-bold text-zinc-100">
+                                    {confirmBulkDelete.length === 1 ? 'Remove Report?' : `Remove ${confirmBulkDelete.length} Reports?`}
+                                </h3>
+                                <p className="text-xs text-zinc-500 mt-0.5">Archive to keep, or delete permanently.</p>
+                            </div>
+                        </div>
+                        <div className="flex gap-2 justify-end">
+                            <button
+                                onClick={() => setConfirmBulkDelete(null)}
+                                className="px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-xl transition-all"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => {
+                                    moveAndAdvance(confirmBulkDelete, ARCHIVE_ID);
+                                    setConfirmBulkDelete(null);
+                                    showToast?.(`${confirmBulkDelete.length} report${confirmBulkDelete.length > 1 ? 's' : ''} archived`, 'info');
+                                }}
+                                className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl transition-all"
+                            >
+                                <Archive className="w-3.5 h-3.5" />
+                                Archive
+                            </button>
+                            <button
+                                onClick={() => {
+                                    for (const id of confirmBulkDelete) removeReport(id);
+                                    if (activeReportId && confirmBulkDelete.includes(activeReportId)) setActiveReportId(null);
+                                    setSelectedIds(new Set());
+                                    setConfirmBulkDelete(null);
+                                    showToast?.(`${confirmBulkDelete.length} report${confirmBulkDelete.length > 1 ? 's' : ''} deleted`, 'success');
+                                }}
+                                className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-red-400 bg-red-950/60 hover:bg-red-900/60 border border-red-900/60 rounded-xl transition-all"
+                            >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }

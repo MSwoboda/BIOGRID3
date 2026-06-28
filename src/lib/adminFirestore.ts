@@ -4,7 +4,7 @@
 // Firestore rules only allow these reads if the requester has an admins/{uid} document.
 
 import {
-  collection, getDocs, doc, query, orderBy, getFirestore, updateDoc, writeBatch
+  collection, getDocs, getDocsFromServer, doc, query, orderBy, getFirestore, updateDoc, writeBatch
 } from 'firebase/firestore';
 import { app } from './firebase';
 
@@ -20,11 +20,14 @@ export interface AdminUserRecord {
   createdAt: number;
   updatedAt?: number;
   paused?: boolean;
+  photoURL?: string;
+  avatarSeed?: string;
 }
 
 /** List all registered users from the denormalised userIndex collection. */
 export async function listAllUsers(): Promise<AdminUserRecord[]> {
-  const snap = await getDocs(
+  // Always fetch from server to get the latest data
+  const snap = await getDocsFromServer(
     query(collection(db, 'userIndex'), orderBy('createdAt', 'desc'))
   );
   return snap.docs.map(d => d.data() as AdminUserRecord);
@@ -40,28 +43,55 @@ export async function setUserSuspension(uid: string, paused: boolean): Promise<v
   ]);
 }
 
-/** Fetch a user's login history. */
+/** Fetch a user's login history — always from server for freshness. */
 export async function getUserLoginHistory(uid: string): Promise<any[]> {
-  const snap = await getDocs(
-    query(collection(db, 'users', uid, 'loginHistory'), orderBy('timestamp', 'desc'))
-  );
-  return snap.docs.map(d => d.data());
+  try {
+    const snap = await getDocsFromServer(
+      query(collection(db, 'users', uid, 'loginHistory'), orderBy('timestamp', 'desc'))
+    );
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.error(`[Admin] Failed to load login history for ${uid}:`, err);
+    // Fallback: try without orderBy (in case the field doesn't exist on some docs)
+    const snap = await getDocsFromServer(collection(db, 'users', uid, 'loginHistory'));
+    return snap.docs
+      .map(d => d.data())
+      .sort((a: any, b: any) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+  }
 }
 
-/** Fetch a user's search history. */
+/** Fetch a user's search history — always from server for freshness. */
 export async function getUserSearchHistory(uid: string): Promise<any[]> {
-  const snap = await getDocs(
-    query(collection(db, 'users', uid, 'searchHistory'), orderBy('timestamp', 'desc'))
-  );
-  return snap.docs.map(d => d.data());
+  try {
+    const snap = await getDocsFromServer(
+      query(collection(db, 'users', uid, 'searchHistory'), orderBy('timestamp', 'desc'))
+    );
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.error(`[Admin] Failed to load search history for ${uid}:`, err);
+    // Fallback: try without orderBy
+    const snap = await getDocsFromServer(collection(db, 'users', uid, 'searchHistory'));
+    return snap.docs
+      .map(d => d.data())
+      .sort((a: any, b: any) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+  }
 }
 
-/** Fetch a user's saved reports. */
+/** Fetch a user's saved reports — always from server for freshness. */
 export async function getUserSavedReports(uid: string): Promise<any[]> {
-  const snap = await getDocs(
-    query(collection(db, 'users', uid, 'savedReports'), orderBy('savedAt', 'desc'))
-  );
-  return snap.docs.map(d => d.data());
+  try {
+    const snap = await getDocsFromServer(
+      query(collection(db, 'users', uid, 'savedReports'), orderBy('savedAt', 'desc'))
+    );
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.error(`[Admin] Failed to load saved reports for ${uid}:`, err);
+    // Fallback: try without orderBy
+    const snap = await getDocsFromServer(collection(db, 'users', uid, 'savedReports'));
+    return snap.docs
+      .map(d => d.data())
+      .sort((a: any, b: any) => (b.savedAt ?? 0) - (a.savedAt ?? 0));
+  }
 }
 
 /** Purges all Firestore data belonging to the user. */

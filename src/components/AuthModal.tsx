@@ -53,8 +53,13 @@ export default function AuthModal({
 
   const handleGoogle = async () => {
     setLoading(true); clearError(); setLocalError('');
-    await onSignInGoogle();
-    setLoading(false);
+    try {
+      await onSignInGoogle();
+    } catch {
+      // popup closed or other error — handled by useAuth
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSignIn = async (e: React.FormEvent) => {

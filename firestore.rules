@@ -3,41 +3,39 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
-    // Admin status is determined solely by the presence of an admins/{uid} doc.
-    // That doc can only be written via Firebase Console or Admin SDK.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
     function isAdmin() {
-      return request.auth != null &&
+      return isSignedIn() &&
              exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
-    // Check if the current authenticated user's account is suspended.
-    function isPaused() {
-      return exists(/databases/$(database)/documents/userIndex/$(request.auth.uid)) &&
-             get(/databases/$(database)/documents/userIndex/$(request.auth.uid)).data.paused == true;
-    }
-
-    // ── User private data ───────────────────────────────────────────────────────
-    // Each user can only read/write their own subtree.
-    // Admins can read or delete/write (for administrative management and purging).
-    match /users/{uid}/{document=**} {
-      allow read:  if (request.auth != null && request.auth.uid == uid && !isPaused()) || isAdmin();
-      allow write: if (request.auth != null && request.auth.uid == uid && !isPaused()) || isAdmin();
-    }
-
-    // ── User index (denormalised, for admin dashboard) ──────────────────────────
-    // Each user writes their own summary record on profile save.
-    // Only admins can list/read all records and manage them.
-    match /userIndex/{uid} {
-      allow read:  if isAdmin();
-      allow write: if (request.auth != null && request.auth.uid == uid && !isPaused()) || isAdmin();
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
     }
 
     // ── Admin whitelist ─────────────────────────────────────────────────────────
-    // Admin docs can only be written via Firebase Console or Admin SDK.
-    // Each admin can read their own doc (to verify their status) — no other reads.
     match /admins/{uid} {
-      allow read:  if request.auth != null && request.auth.uid == uid;
+      allow read:  if isSignedIn();
       allow write: if false;
+    }
+
+    // ── User private data ───────────────────────────────────────────────────────
+    match /users/{uid}/{path=**} {
+      allow read, write: if isOwner(uid) || isAdmin();
+    }
+
+    // ── User index (denormalised, for admin dashboard) ──────────────────────────
+    match /userIndex/{uid} {
+      allow read:  if isAdmin();
+      allow write: if isOwner(uid) || isAdmin();
+    }
+
+    // ── Shared links ──────────────────────────────────────────────────────────
+    match /shares/{shareId} {
+      allow read, write: if isSignedIn();
     }
   }
 }

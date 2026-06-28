@@ -1,9 +1,10 @@
 // src/components/ProfileModal.tsx
 import React, { useState, useEffect } from 'react';
-import { X, User, Shield, AlertTriangle, LogOut, Loader2, Check, Eye, EyeOff, ChevronRight } from 'lucide-react';
+import { X, User, Shield, AlertTriangle, LogOut, Loader2, Check, Eye, EyeOff, ChevronRight, RefreshCw } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { UserProfile } from '../lib/firestore';
 import { User as FirebaseUser } from 'firebase/auth';
+import GlyphAvatar from './GlyphAvatar';
 
 const ROLES = [
   'Researcher / Scientist',
@@ -47,6 +48,7 @@ export default function ProfileModal({
   const [company, setCompany]   = useState(profile?.company   ?? '');
   const [role, setRole]         = useState(profile?.role      ?? '');
   const [marketing, setMkt]     = useState(profile?.marketingConsent ?? false);
+  const [avatarSeed, setAvatarSeed] = useState(profile?.avatarSeed ?? '');
 
   // Password fields
   const [curPw, setCurPw]       = useState('');
@@ -64,6 +66,7 @@ export default function ProfileModal({
       setCompany(profile.company ?? '');
       setRole(profile.role ?? '');
       setMkt(profile.marketingConsent ?? false);
+      setAvatarSeed(profile.avatarSeed ?? '');
     }
   }, [profile]);
 
@@ -89,6 +92,7 @@ export default function ProfileModal({
         termsAgreedAt: profile?.termsAgreedAt ?? Date.now(),
         marketingConsent: marketing,
         createdAt: profile?.createdAt ?? Date.now(),
+        avatarSeed: avatarSeed || '',
       });
       setSaveOk(true);
       setTimeout(() => setSaveOk(false), 2500);
@@ -142,9 +146,7 @@ export default function ProfileModal({
             {user.photoURL ? (
               <img src={user.photoURL} alt={displayName} className="w-10 h-10 rounded-full ring-2 ring-zinc-700" />
             ) : (
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-white font-bold text-base shrink-0">
-                {initials}
-              </div>
+              <GlyphAvatar seed={avatarSeed || user.uid || user.email || 'user'} size={40} className="ring-2 ring-zinc-700" />
             )}
             <div>
               <p className="text-sm font-bold text-zinc-100">{displayName}</p>
@@ -180,6 +182,24 @@ export default function ProfileModal({
           {/* ── PROFILE TAB ── */}
           {tab === 'profile' && (
             <div className="space-y-4">
+              {/* Avatar section — only when no profile photo */}
+              {!user.photoURL && (
+                <div className="flex items-center gap-4 p-4 bg-zinc-800/40 border border-zinc-700/50 rounded-xl">
+                  <GlyphAvatar seed={avatarSeed || user.uid || user.email || 'user'} size={56} className="ring-2 ring-zinc-600" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-zinc-300 mb-1">Avatar</p>
+                    <p className="text-[11px] text-zinc-500 mb-2.5">Your unique geometric sigil. Regenerate for a new one.</p>
+                    <button
+                      type="button"
+                      onClick={() => setAvatarSeed(`${user.uid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-500 text-[11px] font-semibold transition-all active:scale-95"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      Regenerate
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-zinc-400 mb-1.5">First Name</label>

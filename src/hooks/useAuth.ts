@@ -13,7 +13,7 @@ import {
   signOut as fbSignOut,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
-import { loadUserProfile, saveUserProfile, UserProfile, recordLoginHistory } from '../lib/firestore';
+import { loadUserProfile, saveUserProfile, UserProfile, recordLoginHistory, syncUserIndex } from '../lib/firestore';
 
 export type { UserProfile };
 
@@ -104,6 +104,9 @@ export function useAuth(): AuthState {
 
         // Record login once per session
         if (p) {
+          // Always sync photoURL to userIndex (admin needs latest)
+          syncUserIndex(user.uid, user.photoURL, p.avatarSeed).catch(console.error);
+
           const sessionKey = `biogrid_login_${user.uid}_${p.updatedAt || 0}`;
           if (!sessionStorage.getItem(sessionKey)) {
             sessionStorage.setItem(sessionKey, '1');
@@ -184,7 +187,7 @@ export function useAuth(): AuthState {
 
   const saveProfile = useCallback(async (p: UserProfile) => {
     if (!user) throw new Error('Not signed in');
-    await saveUserProfile(user.uid, p, user.email ?? undefined);
+    await saveUserProfile(user.uid, p, user.email ?? undefined, user.photoURL ?? undefined);
     setProfile(p);
     setNeedsOnboarding(false);
   }, [user]);

@@ -35,6 +35,25 @@ export interface CountResult {
   count: number;
 }
 
+export interface FilterDim { include: string[]; exclude: string[] }
+
+export interface FiltersSnapshot {
+  eventTypes: FilterDim;
+  manufacturers: FilterDim;
+  deviceNames: FilterDim;
+  eventLocations: FilterDim;
+  reportSources: FilterDim;
+  reporterStates: FilterDim;
+  sexes: FilterDim;
+  patientProblems: FilterDim;
+  productProblems: FilterDim;
+  productCodes: FilterDim;
+  searchField: string;
+  startDate: string;
+  endDate: string;
+  limit: number | 'All';
+}
+
 export interface SearchHistoryItem {
   id: string;
   category: Category;
@@ -43,12 +62,7 @@ export interface SearchHistoryItem {
   timestamp: number;
   saved?: boolean;        // true = pinned saved query
   savedLabel?: string;    // user-chosen label for saved queries
-  filters?: {
-    startDate?: string;
-    endDate?: string;
-    limit?: number;
-    searchField?: string;
-  };
+  filters?: FiltersSnapshot;
 }
 
 export interface ChartData {
